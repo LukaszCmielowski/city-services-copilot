@@ -72,7 +72,7 @@ python3 scripts/run_cluster_demo.py --dry-run
 python3 scripts/run_cluster_demo.py
 ```
 
-The dry run validates the bundled data and configuration, then prints every S3 object and pipeline parameter without writing to the cluster. The normal command uploads the bundled synthetic CSVs, documents, and evaluation JSON; then submits the tabular AutoML, time-series AutoML, and AutoRAG managed pipelines. After submission in an interactive terminal, it asks whether to watch all runs. When successful tabular or time-series runs finish, it asks whether to deploy their selected models as KServe scoring endpoints; that deployment prompt defaults to **No**. Use `--wait` to start watching without the first prompt, `--non-interactive` for unattended submission, `--only tabular`, `--only timeseries`, or `--only autorag` to run one pipeline, and `--skip-upload` only after a successful upload.
+The dry run validates the bundled data and configuration, then shows a compact submission plan—pipeline, S3 inputs, existing connection names, targets, and selected models—without writing to the cluster. Add `--show-parameters` only when troubleshooting and you need the full KFP parameter JSON. The normal command uploads the bundled synthetic CSVs, documents, and evaluation JSON; then submits the tabular AutoML, time-series AutoML, and AutoRAG managed pipelines. After submission in an interactive terminal, it asks whether to watch all runs. When successful tabular or time-series runs finish, it asks whether to deploy their selected models as KServe scoring endpoints; that deployment prompt defaults to **No**. Use `--wait` to start watching without the first prompt, `--non-interactive` for unattended submission, `--only tabular`, `--only timeseries`, or `--only autorag` to run one pipeline, and `--skip-upload` only after a successful upload.
 
 ### Monitor submitted runs and leaderboards
 
@@ -95,6 +95,8 @@ python3 scripts/run_cluster_demo.py --deploy TABULAR_RUN_ID TIMESERIES_RUN_ID --
 Add `--dry-run` to inspect the chosen model and generated `InferenceService` manifest without creating anything; it only reads the model artifacts from object storage.
 
 This is an explicit cluster write: it creates `city-services-tabular-<first-8-run-id>` and `city-services-timeseries-<first-8-run-id>` in `RHOAI_PROJECT_NAME`. The command reuses an existing KServe-compatible object-storage data connection (`AUTOML_KSERVE_STORAGE_KEY`, defaulting to `AUTOML_S3_SECRET_NAME`), its service account (default `<storage-key>-sa`), and `AUTOML_SERVING_RUNTIME_NAME`. The connection must have read access to the pipeline-artifact bucket, and the named serving runtime must already support AutoGluon. The script does not create or alter secrets, service accounts, serving runtimes, or Model Registry records.
+
+When a deployed service becomes ready, the runner updates the Git-ignored `app-config.json` (or `DEMO_APP_CONFIG_PATH`) with its KServe v1 scoring URI and a per-endpoint copy of the existing `RHOAI_TOKEN`. It preserves any existing AutoRAG `responses` endpoint and its default `api_token`. The app recognizes `endpoint_protocol: "kserve-v1"`, converts the UI request into the AutoGluon training schema and KServe `instances` payload, and adapts the native prediction response back to the UI. Start `python3 main.py` after deployment to use those configured scoring services.
 
 For the runs printed by the example submission, use one line to avoid shell line-continuation mistakes:
 
@@ -295,11 +297,11 @@ For this sample, the user only needs to provide an API key/token and the three e
 cp app-config.example.json app-config.json
 ```
 
-`app-config.json` is ignored by Git and is read only by the Python backend. Start the app normally with `python3 main.py`; when an endpoint URI is configured, its matching route forwards the request to that endpoint with `Authorization: Bearer <api_token>`. Omit the file to keep using local sample mode.
+`app-config.json` is ignored by Git and is read only by the Python backend. Start the app normally with `python3 main.py`; when an endpoint URI is configured, its matching route forwards the request to that endpoint with `Authorization: Bearer <api_token>`. The deployment runner creates or updates the tabular and time-series entries automatically after those KServe services are ready; add the AutoRAG `responses` entry separately. Omit the file to keep using local sample mode.
 
 The `responses` URI is the deployed best AutoRAG pattern's OpenAI Responses-compatible REST endpoint. For every question, `/api/ask` sends `{"input": "<user question>"}` to that URI and renders the returned `output_text` plus any standard URL citations. No model name, MaaS setting, vector-database setting, or additional RAG configuration is required in the app.
 
-The scoring endpoints must accept the JSON payload from their matching route and return the response contract below. If a deployed model uses a platform-specific request or response envelope, put that small transformation in the endpoint deployment—not in the browser. Do not expose endpoints, tokens, MaaS, S3, or vector-database credentials to [app.js](app.js).
+For runner-configured `kserve-v1` endpoints, the Python backend performs the AutoGluon/KServe request and response adaptation. Other scoring endpoints must accept the JSON payload from their matching route and return the response contract below. Do not expose endpoints, tokens, MaaS, S3, or vector-database credentials to [app.js](app.js).
 
 | Route | Source | Response contract |
 | --- | --- | --- |

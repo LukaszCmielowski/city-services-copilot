@@ -104,6 +104,10 @@ def config() -> dict[str, object]:
     rhoai_url = optional_env("RHOAI_URL").rstrip("/")
     if not kfp_url and not rhoai_url:
         raise RuntimeError("Set RHOAI_KFP_URL, or set RHOAI_URL to discover the existing pipeline Route")
+    app_config_name = optional_env("DEMO_APP_CONFIG_PATH", "app-config.json")
+    app_config_path = (ROOT / app_config_name).resolve()
+    if ROOT.resolve() not in app_config_path.parents:
+        raise RuntimeError("DEMO_APP_CONFIG_PATH must be inside this repository")
     return {
         "kfp_url": kfp_url + "/" if kfp_url else "",
         "rhoai_url": rhoai_url,
@@ -134,6 +138,7 @@ def config() -> dict[str, object]:
         "deploy_cpu": env("AUTOML_DEPLOY_CPU", required=False, default="2"),
         "deploy_memory": env("AUTOML_DEPLOY_MEMORY", required=False, default="4Gi"),
         "deploy_timeout": positive_int_env("AUTOML_DEPLOY_TIMEOUT_SECONDS", 600),
+        "app_config_path": app_config_path,
         "embedding_models": env_list("AUTORAG_EMBEDDING_MODELS"),
         "generation_models": env_list("AUTORAG_GENERATION_MODELS"),
         "tabular_pipeline": env("RHOAI_MANAGED_PIPELINE_TABULAR", required=False, default="autogluon-tabular-training-pipeline"),
@@ -490,23 +495,91 @@ def inference_service_manifest(settings: dict[str, object], name: str, predictor
 
 
 def wait_for_inference_service(client, settings: dict[str, object], name: str) -> dict:
+    """Wait for KServe readiness without flooding an interactive terminal."""
     deadline = time.monotonic() + settings["deploy_timeout"]
+    live_wait = sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+    previous_status = None
     while time.monotonic() < deadline:
         service = client.get_namespaced_custom_object(group="serving.kserve.io", version="v1beta1", namespace=settings["project"], plural="inferenceservices", name=name, _request_timeout=30)
         conditions = (service.get("status") or {}).get("conditions") or []
         ready = next((condition for condition in conditions if condition.get("type") == "Ready"), None)
         if ready and ready.get("status") == "True":
             return service
-        if ready:
-            print(f"  {name}: Ready={ready.get('status')} {ready.get('reason', '')}")
-        time.sleep(15)
+        state = ready.get("status", "Unknown") if ready else "Pending"
+        reason = ready.get("reason", "") if ready else ""
+        status = f"{state}{f': {reason}' if reason else ''}"
+        if not live_wait and status != previous_status:
+            print(f"  {name}: readiness {status}")
+        previous_status = status
+        remaining = max(0, deadline - time.monotonic())
+        if live_wait:
+            endpoint_spinner_wait(min(15, remaining), name, status)
+        else:
+            time.sleep(min(15, remaining))
     raise RuntimeError(f"InferenceService {name!r} did not become ready within {settings['deploy_timeout']}s")
+
+
+def endpoint_spinner_wait(seconds: float, name: str, status: str) -> None:
+    """Render one animated readiness line while KServe reconciles an endpoint."""
+    frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    deadline = time.monotonic() + seconds
+    frame = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        message = f"{frames[frame % len(frames)]} Deploying {name} — readiness {status}; checking again in {max(1, round(remaining))}s"
+        sys.stdout.write(f"\r\033[K{paint(message, '33')}")
+        sys.stdout.flush()
+        time.sleep(min(0.15, remaining))
+        frame += 1
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+
+
+def inference_url(service: dict, name: str) -> str:
+    status = service.get("status") or {}
+    base_url = status.get("url") or (status.get("address") or {}).get("url")
+    if not base_url:
+        raise RuntimeError(f"InferenceService {name!r} is ready but did not report a public URL")
+    return f"{base_url.rstrip('/')}/v1/models/{name}:predict"
+
+
+def update_app_config(settings: dict[str, object], endpoints: dict[str, str]) -> None:
+    """Merge ready native KServe endpoints into the app's private configuration."""
+    path = settings["app_config_path"]
+    if path.exists():
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"Cannot update {path.name}: it is not valid JSON") from error
+        if not isinstance(config, dict):
+            raise RuntimeError(f"Cannot update {path.name}: it must contain a JSON object")
+    else:
+        config = {}
+    current_endpoints = config.get("endpoints") or {}
+    if not isinstance(current_endpoints, dict):
+        raise RuntimeError(f"Cannot update {path.name}: endpoints must be a JSON object")
+    current_endpoints.update(endpoints)
+    config["endpoints"] = current_endpoints
+    config["endpoint_protocol"] = "kserve-v1"
+    endpoint_tokens = config.get("endpoint_tokens") or {}
+    if not isinstance(endpoint_tokens, dict):
+        raise RuntimeError(f"Cannot update {path.name}: endpoint_tokens must be a JSON object")
+    endpoint_tokens.update({name: settings["token"] for name in endpoints})
+    config["endpoint_tokens"] = endpoint_tokens
+    if not isinstance(config.get("api_token"), str) or not config["api_token"].strip() or config["api_token"].startswith("replace-with-"):
+        config["api_token"] = settings["token"]
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    configured = ", ".join(sorted(endpoints))
+    print(f"  Updated {path.relative_to(ROOT)} with {configured}; it remains Git-ignored.")
 
 
 def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bool, dry_run: bool) -> None:
     from kubernetes.client.rest import ApiException
 
     client = None if dry_run else kserve_client(settings)
+    app_endpoints = {}
     for run_id in run_ids:
         selected = select_best_automl_model(settings, run_id)
         kind = "tabular" if selected["pipeline"] == settings["tabular_pipeline"] else "timeseries"
@@ -527,19 +600,39 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
             service = wait_for_inference_service(client, settings, name)
             status = service.get("status") or {}
             print(f"  Ready endpoint: {status.get('url') or (status.get('address') or {}).get('url') or 'check the OpenShift AI dashboard'}")
+            app_endpoints[f"{kind}_scoring"] = inference_url(service, name)
+        else:
+            service = client.get_namespaced_custom_object(group="serving.kserve.io", version="v1beta1", namespace=settings["project"], plural="inferenceservices", name=name, _request_timeout=30)
+            ready = next((condition for condition in (service.get("status") or {}).get("conditions", []) if condition.get("type") == "Ready"), None)
+            if ready and ready.get("status") == "True":
+                app_endpoints[f"{kind}_scoring"] = inference_url(service, name)
+            else:
+                print(f"  {name} is not ready yet; app configuration was not updated for it.")
+    if app_endpoints and not dry_run:
+        update_app_config(settings, app_endpoints)
 
 
 def spinner_wait(seconds: int, states: dict[str, str]) -> None:
     """Show an in-place spinner while waiting for the next KFP status poll."""
     frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-    summary = ", ".join(f"{state.lower()}={count}" for state, count in sorted({state: list(states.values()).count(state) for state in set(states.values())}.items()))
+    labels = {
+        "SUCCEEDED": "completed", "COMPLETED": "completed", "FAILED": "failed",
+        "ERROR": "failed", "CANCELLED": "cancelled", "SKIPPED": "skipped",
+        "RUNNING": "running", "PENDING": "queued", "QUEUED": "queued",
+    }
+    counts = {}
+    for state in states.values():
+        label = labels.get(state, state.lower().replace("_", " "))
+        counts[label] = counts.get(label, 0) + 1
+    order = {"running": 0, "queued": 1, "completed": 2, "failed": 3, "cancelled": 4, "skipped": 5}
+    summary = " · ".join(f"{count} {label}" for label, count in sorted(counts.items(), key=lambda item: order.get(item[0], 99)))
     deadline = time.monotonic() + seconds
     frame = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        message = f"{frames[frame % len(frames)]} Watching {len(states)} run(s): {summary} — next check in {max(1, round(remaining))}s"
+        message = f"{frames[frame % len(frames)]} {summary} — checking again in {max(1, round(remaining))}s"
         sys.stdout.write(f"\r\033[K{paint(message, '33')}")
         sys.stdout.flush()
         time.sleep(min(0.15, remaining))
@@ -644,12 +737,42 @@ def parameters(settings: dict[str, object]) -> dict[str, dict[str, object]]:
     }
 
 
-def submit(client, settings: dict[str, object], selected: list[str], dry_run: bool) -> dict[str, str]:
+def print_submission_plan(pipelines: dict[str, object], run_parameters: dict[str, dict[str, object]], selected: list[str], show_parameters: bool) -> None:
+    """Render the dry-run plan in terms a demo user can verify at a glance."""
+    titles = {"tabular": "Tabular AutoML — SLA-miss risk", "timeseries": "Time-series AutoML — request demand", "autorag": "AutoRAG — grounded service guidance"}
+    print("\n" + paint("DRY RUN — no data will be uploaded and no pipeline runs will be created.", "1;33"))
+    print(paint("Submission plan", "1"))
+    for index, name in enumerate(selected, start=1):
+        params = run_parameters[name]
+        print(f"\n  {index}. {paint(titles[name], '1;36')}")
+        print(f"     Pipeline:   {pipelines[name]}")
+        if name == "tabular":
+            print(f"     Training:   s3://{params['train_data_bucket_name']}/{params['train_data_file_key']}")
+            print(f"     Connection: {params['train_data_secret_name']}")
+            print(f"     Target:     {params['label_column']} ({params['task_type']}, positive class {params['positive_class']})")
+            print(f"     Training:   {params['preset']} preset; retain top {params['top_n']} models")
+        elif name == "timeseries":
+            print(f"     Training:   s3://{params['train_data_bucket_name']}/{params['train_data_file_key']}")
+            print(f"     Connection: {params['train_data_secret_name']}")
+            print(f"     Forecast:   {params['prediction_length']} days; target={params['target']}; series={params['id_column']}; time={params['timestamp_column']}")
+            print(f"     Training:   {params['preset']} preset; retain top {params['top_n']} models")
+        else:
+            print(f"     Evaluation: s3://{params['test_data_bucket_name']}/{params['test_data_key']}")
+            print(f"     Corpus:     s3://{params['input_data_bucket_name']}/{params['input_data_keys'][0]}")
+            print(f"     Connections: evaluation={params['test_data_secret_name']}; documents={params['input_data_secret_name']}; MaaS={params['maas_secret_name']}; vector DB={params['db_secret_name']}")
+            print(f"     Models:     embedding={', '.join(params['embedding_models'])}; generation={', '.join(params['generation_models'])}")
+            print(f"     Optimize:   {params['optimization_metric']}; evaluate up to {params['optimization_max_rag_patterns']} patterns ({params['preset']} preset)")
+        if show_parameters:
+            print(paint("     Full parameters:", "2"))
+            for line in json.dumps(params, indent=2).splitlines():
+                print(f"       {line}")
+
+
+def submit(client, settings: dict[str, object], selected: list[str], dry_run: bool, show_parameters: bool = False) -> dict[str, str]:
     run_parameters = parameters(settings)
     pipelines = {"tabular": settings["tabular_pipeline"], "timeseries": settings["timeseries_pipeline"], "autorag": settings["autorag_pipeline"]}
     if dry_run:
-        for name in selected:
-            print(f"\nWould submit {pipelines[name]} with:\n{json.dumps(run_parameters[name], indent=2)}")
+        print_submission_plan(pipelines, run_parameters, selected, show_parameters)
         return {}
     experiment = experiment_id(client, settings["experiment"], settings["project"])
     submitted = {}
@@ -699,7 +822,11 @@ def post_submit_guide(client, settings: dict[str, object], submitted: dict[str, 
 
     deploy_command = "python3 scripts/run_cluster_demo.py --deploy " + " ".join(automl_run_ids) + " --wait-deploy"
     print("\nThe best model from each successful AutoML run is ready for optional deployment.")
-    if not confirm("Create the KServe scoring endpoint(s)", default=False):
+    for name in ("tabular", "timeseries"):
+        run_id = submitted.get(name)
+        if run_id in automl_run_ids:
+            print(f"  {name:<10} {run_id}")
+    if not confirm("Would you like to automatically deploy these trained models as KServe scoring endpoints", default=False):
         print(f"Deploy them later with:\n  {deploy_command}")
         return
     wait_for_endpoints = confirm("Wait for the scoring endpoint(s) to become ready", default=True)
@@ -719,6 +846,7 @@ def main() -> None:
     parser.add_argument("--poll-interval", type=int, default=15, help="status polling interval in seconds (default: 15)")
     parser.add_argument("--non-interactive", action="store_true", help="do not prompt to watch or deploy after submitting runs")
     parser.add_argument("--dry-run", action="store_true", help="validate configuration and print actions without network writes")
+    parser.add_argument("--show-parameters", action="store_true", help="with --dry-run, include the full KFP parameter JSON after each summary")
     args = parser.parse_args()
     try:
         if args.poll_interval <= 0:
@@ -741,7 +869,7 @@ def main() -> None:
         if not args.skip_upload:
             upload_data(settings, args.dry_run)
         if args.dry_run:
-            submit(None, settings, selected, True)
+            submit(None, settings, selected, True, args.show_parameters)
         else:
             client = make_client(settings)
             submitted = submit(client, settings, selected, False)

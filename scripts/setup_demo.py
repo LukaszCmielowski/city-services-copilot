@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--skip-upload", action="store_true", help="submit runs without uploading bundled data")
     parser.add_argument("--only", choices=("all", "tabular", "timeseries", "autorag"), default="all")
     parser.add_argument("--wait", action="store_true", help="wait for each submitted KFP run to finish")
+    parser.add_argument("--show-parameters", action="store_true", help="include full KFP parameter JSON in the preflight")
     args = parser.parse_args()
 
     if not args.env_file.is_file():
@@ -48,6 +49,8 @@ def main() -> None:
         runner.append("--wait")
     if args.apply:
         runner.append("--non-interactive")
+    if args.show_parameters:
+        runner.append("--show-parameters")
 
     print("City Services Copilot setup\n")
     print("This guided flow uses the bundled synthetic data and your existing cluster connections.")
