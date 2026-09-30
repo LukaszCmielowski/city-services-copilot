@@ -1,0 +1,95 @@
+[
+  {
+    "question": "What information should I include when reporting illegal dumping?",
+    "correct_answers": [
+      "Include the closest address, a description of the dumped material, and photos when it is safe to do so.",
+      "Provide a precise location and description; photos can help when safe."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/illegal-dumping.md"]
+  },
+  {
+    "question": "What happens after a 311 illegal dumping report is submitted?",
+    "correct_answers": [
+      "The request can be routed for inspection, cleanup, or enforcement depending on the report and site conditions.",
+      "The Streets Department reviews eligible reports and routes work based on priority and crew capacity."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/illegal-dumping.md", "city-services-copilot/autorag/guidance/311-status.md"]
+  },
+  {
+    "question": "When should a resident call 911 instead of submitting a 311 request?",
+    "correct_answers": [
+      "Call 911 for an immediate hazard or emergency; 311 service requests are not emergency response."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/311-status.md"]
+  },
+  {
+    "question": "What location information should I provide for a pothole report?",
+    "correct_answers": [
+      "Provide the closest address or intersection and, when relevant, the travel direction and road condition."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/pothole-repair.md"]
+  },
+  {
+    "question": "What should I include in a missed trash collection request?",
+    "correct_answers": [
+      "Include the address, whether trash or recycling was missed, and the date of the missed collection."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/missed-trash-collection.md"]
+  },
+  {
+    "question": "What details help the city identify a streetlight outage?",
+    "correct_answers": [
+      "Provide the nearest address or intersection and a pole number or other safe-to-observe location detail when available."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/streetlight-outage.md"]
+  },
+  {
+    "question": "What information is useful when reporting graffiti?",
+    "correct_answers": [
+      "Include the location, property type, a description, and safe-to-capture photos."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/graffiti-removal.md"]
+  },
+  {
+    "question": "How can a resident follow the status of a 311 request?",
+    "correct_answers": [
+      "Follow the request in the 311 service-request system, where status can show received, in progress, completed, or closed with an explanation."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/311-service-overview.md", "city-services-copilot/autorag/guidance/311-status.md"]
+  },
+  {
+    "question": "What happens after I request cleanup of an overgrown vacant lot?",
+    "correct_answers": [
+      "The lot can be inspected for a property-maintenance violation, the owner can receive notice, and city cleanup may follow if a confirmed violation is not corrected."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/vacant-lot-cleanup.md"]
+  },
+  {
+    "question": "What details should I provide in an abandoned vehicle report?",
+    "correct_answers": [
+      "Provide the location, vehicle type, color, safely visible license plate, and why the vehicle appears abandoned."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/abandoned-vehicle.md"]
+  },
+  {
+    "question": "What should I include when reporting a traffic signal problem?",
+    "correct_answers": [
+      "Include the intersection, direction of travel, the signal or sign involved, and a description of the condition."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/traffic-signal-and-sign.md"]
+  },
+  {
+    "question": "How should I report a damaged manhole cover?",
+    "correct_answers": [
+      "Provide the nearest address or intersection and describe where the cover is located and how it is damaged."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/damaged-manhole-cover.md"]
+  },
+  {
+    "question": "What information is needed for a sanitation code violation report?",
+    "correct_answers": [
+      "Provide the location, the observed condition, and when it was observed without unnecessary personal information."
+    ],
+    "correct_answer_document_keys": ["city-services-copilot/autorag/guidance/sanitation-code-violation.md"]
+  }
+]

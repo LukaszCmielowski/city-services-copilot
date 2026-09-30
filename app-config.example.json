@@ -1,0 +1,8 @@
+{
+  "api_token": "replace-with-your-api-key-or-token",
+  "endpoints": {
+    "tabular_scoring": "https://YOUR-ENDPOINT/v1/models/resolution-risk:predict",
+    "timeseries_scoring": "https://YOUR-ENDPOINT/v1/models/service-demand:predict",
+    "responses": "https://YOUR-ENDPOINT/v1/responses"
+  }
+}
