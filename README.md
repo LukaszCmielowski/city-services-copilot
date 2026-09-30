@@ -30,15 +30,22 @@ The repository already contains safe, synthetic fixture CSVs, a twenty-two-docum
 
 After the one-time platform prerequisites are ready, the demo user only needs to:
 
-1. Validate and upload the bundled fixture data:
+1. Create their private environment file and install the runner dependencies:
 
    ```bash
-   scripts/upload_demo_data.sh --bucket YOUR_BUCKET --apply
+   cp .env.example .env
+   python3 -m pip install -r requirements-cluster.txt
    ```
 
-   Add `--profile` or `--endpoint-url` if your S3-compatible storage requires them. Omit `--apply` first to review a dry run.
+   Fill `.env` with the cluster or KFP route and token, S3 connection, existing Kubernetes-secret names, MaaS/vector-database secret names, and model IDs. Set `RHOAI_KFP_URL` directly, or set `RHOAI_URL` and let the runner discover the existing `ds-pipeline` OpenShift Route in the project.
 
-2. Start the three pipeline runs using the values in [Train AutoML models](#3-train-automl-models) and [Run AutoRAG](#4-run-autorag).
+2. Review the planned upload and submissions, then execute them:
+
+   ```bash
+   python3 scripts/run_cluster_demo.py --dry-run
+   python3 scripts/run_cluster_demo.py
+   ```
+
 3. Start the app with `python3 main.py`, then open `http://localhost:8000`.
 
 The repository contains deterministic synthetic fixtures with 5,000 tabular rows, 7,300 time-series rows across all 20 service/neighborhood series, twenty-two guidance documents, and thirteen AutoRAG evaluation questions. The CSVs exceed the AutoML 1,000-record minimum and make a more realistic pipeline exercise. They are still not intended to produce credible quality metrics. Recreate the CSVs with `python3 scripts/generate_demo_fixtures.py` if needed.
@@ -51,7 +58,61 @@ Prefer a prompt-driven flow? Run:
 python3 scripts/setup_demo.py
 ```
 
-The wizard validates the bundled files, asks for non-secret connection names, optionally uploads the fixtures only after confirmation, and prints the ready-to-copy parameters for all three pipeline runs. It never records credentials or secret values.
+After you create `.env` from `.env.example`, the wizard runs the same dry-run preflight, shows every upload and pipeline submission, and asks for confirmation before making changes. Use `--dry-run` to stop after the preview, or `--apply` for an unattended run. It never creates Kubernetes secrets or downloads external data.
+
+### Automated cluster run
+
+To upload the bundled fixtures and submit all three managed pipeline runs from one `.env` file, use the included cluster runner. Its KFP managed-pipeline lookup and bearer-token authentication follow the current [AutoX CI](https://github.com/red-hat-data-services/autox-ci) approach.
+
+```bash
+python3 -m pip install -r requirements-cluster.txt
+cp .env.example .env
+# Edit .env with the cluster, S3, Kubernetes-secret, MaaS, vector-database, and model values.
+python3 scripts/run_cluster_demo.py --dry-run
+python3 scripts/run_cluster_demo.py
+```
+
+The dry run validates the bundled data and configuration, then prints every S3 object and pipeline parameter without writing to the cluster. The normal command uploads the bundled synthetic CSVs, documents, and evaluation JSON; then submits the tabular AutoML, time-series AutoML, and AutoRAG managed pipelines. After submission in an interactive terminal, it asks whether to watch all runs. When successful tabular or time-series runs finish, it asks whether to deploy their selected models as KServe scoring endpoints; that deployment prompt defaults to **No**. Use `--wait` to start watching without the first prompt, `--non-interactive` for unattended submission, `--only tabular`, `--only timeseries`, or `--only autorag` to run one pipeline, and `--skip-upload` only after a successful upload.
+
+### Monitor submitted runs and leaderboards
+
+Use the submitted run IDs to check status without resubmitting anything:
+
+```bash
+python3 scripts/run_cluster_demo.py --status TABULAR_RUN_ID TIMESERIES_RUN_ID AUTORAG_RUN_ID --watch
+```
+
+The monitor prints each KFP run as a compact status block, followed by a ranked leaderboard table once it succeeds. During `--watch` in an interactive terminal, it prints each run link once and then uses one in-place spinner while it waits for the next poll, rather than repeating unchanged running states. Successful states and the best row are highlighted; redirected logs stay readable and print only state changes. It also prints any AutoML HTML leaderboard location and the AutoRAG pattern-artifact location. By default, artifact lookup uses `AWS_S3_BUCKET`; set `PIPELINE_ARTIFACTS_S3_BUCKET` and, if applicable, `PIPELINE_ARTIFACTS_S3_PREFIX` when pipeline artifacts are stored elsewhere. Artifact retrieval uses the same S3 credentials in `.env`.
+
+### Deploy the selected AutoML models
+
+After the tabular and time-series runs have succeeded, the runner can select each run's highest-scoring predictor artifact and create a persistent KServe `InferenceService` for it:
+
+```bash
+python3 scripts/run_cluster_demo.py --deploy TABULAR_RUN_ID TIMESERIES_RUN_ID --wait-deploy
+```
+
+Add `--dry-run` to inspect the chosen model and generated `InferenceService` manifest without creating anything; it only reads the model artifacts from object storage.
+
+This is an explicit cluster write: it creates `city-services-tabular-<first-8-run-id>` and `city-services-timeseries-<first-8-run-id>` in `RHOAI_PROJECT_NAME`. The command reuses an existing KServe-compatible object-storage data connection (`AUTOML_KSERVE_STORAGE_KEY`, defaulting to `AUTOML_S3_SECRET_NAME`), its service account (default `<storage-key>-sa`), and `AUTOML_SERVING_RUNTIME_NAME`. The connection must have read access to the pipeline-artifact bucket, and the named serving runtime must already support AutoGluon. The script does not create or alter secrets, service accounts, serving runtimes, or Model Registry records.
+
+For the runs printed by the example submission, use one line to avoid shell line-continuation mistakes:
+
+```bash
+python3 scripts/run_cluster_demo.py --deploy 840dbfed-0526-4340-b1ee-c130fe73d3c5 59967b67-4d3b-4253-831b-065961aebadd --wait-deploy
+```
+
+If you need to remove these demo endpoints later, delete only the two named resources in the demo project:
+
+```bash
+oc delete inferenceservice city-services-tabular-840dbfed city-services-timeseries-59967b67 -n YOUR_PROJECT
+```
+
+The native AutoGluon KServe APIs return model-specific prediction payloads. Before enabling live mode in this app, place the small request/response adapter described in [Enable live mode](#enable-live-mode) in front of each endpoint so it implements the app's `/api/predict` and `/api/forecast` contracts.
+
+The runner does **not** download public datasets or create/modify Kubernetes secrets. It can read OpenShift Routes when using `RHOAI_URL` discovery, but does not create a DSPA or a Route. Those connections and secret names must already exist in the project. `.env` is Git-ignored; do not share it or commit credentials.
+
+Route discovery prints its target and fails after `RHOAI_OPENSHIFT_API_TIMEOUT_SECONDS` (20 seconds by default) with guidance to verify `RHOAI_URL`, token permissions, VPN/network access, or set `RHOAI_KFP_URL` directly.
 
 ## What this demo uses
 
@@ -64,11 +125,12 @@ The wizard validates the bundled files, asks for non-secret connection names, op
 ## Setup order
 
 1. [Prerequisites](#1-prerequisites)
-2. [Upload the bundled fixtures](#fast-path-run-the-included-demo)
+2. [Upload the bundled fixtures and submit runs](#automated-cluster-run)
 3. [Train AutoML models](#3-train-automl-models)
-4. [Run AutoRAG](#4-run-autorag)
-5. [Connect and launch the app](#5-connect-and-launch-the-app)
-6. [Validate and hand off](#6-validate-and-hand-off)
+4. [Deploy the selected AutoML models](#deploy-the-selected-automl-models)
+5. [Run AutoRAG](#4-run-autorag)
+6. [Connect and launch the app](#5-connect-and-launch-the-app)
+7. [Validate and hand off](#6-validate-and-hand-off)
 
 ## 1. Prerequisites
 
@@ -283,5 +345,7 @@ Keep project/run URLs, artifact IDs, adapter URL, secret-manager location, data 
 | `data/autorag-evaluation.json` | Starter evaluation data. |
 | `scripts/validate_demo_inputs.py` | Dependency-free data preflight validator. |
 | `scripts/upload_demo_data.sh` | Validate and dry-run/upload prepared data to S3-compatible storage. |
-| `scripts/setup_demo.py` | Interactive setup wizard for the bundled demo. |
+| `scripts/setup_demo.py` | Interactive confirmation and preflight for the `.env` cluster runner. |
+| `scripts/run_cluster_demo.py` | Non-interactive `.env` upload and managed-pipeline submission runner. |
 | `scripts/generate_demo_fixtures.py` | Regenerate the deterministic synthetic AutoML fixture CSVs. |
+| `.env.example`, `requirements-cluster.txt` | Cluster-runner configuration template and its Python dependencies. |
