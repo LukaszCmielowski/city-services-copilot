@@ -4,6 +4,12 @@ An end-to-end city-services demo: AutoML predicts 311 resolution risk and demand
 
 This is the single setup guide. Complete the sections in order.
 
+## What the sample app looks like
+
+The local sample mode presents a new 311 service request alongside its predicted SLA risk, seven-day demand forecast, model drivers, and source-grounded guidance answer.
+
+![City Services Copilot sample UI](docs/assets/sample-ui.png)
+
 ## The use case: help 311 teams triage service requests
 
 City service teams receive more requests than they can inspect or resolve at once. A supervisor needs to know which new requests are likely to miss their service target, how much work is approaching, and what the resident should expect next. Those answers usually live in separate places: an operations dataset, a forecasting process, and public service guidance.
