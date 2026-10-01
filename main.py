@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / "app-config.json"
+PUBLIC_STATIC_PATHS = {"/app.js", "/styles.css", "/docs/assets/sample-ui.png"}
 
 
 class EndpointError(Exception):
@@ -391,6 +392,9 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            return
+        if path not in PUBLIC_STATIC_PATHS:
+            self.send_error(HTTPStatus.NOT_FOUND)
             return
         super().do_GET()
     def do_POST(self):
