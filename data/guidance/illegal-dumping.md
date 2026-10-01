@@ -1,6 +1,6 @@
 # Report illegal dumping
 
-Source: https://www.phila.gov/services/working-jobs/cleaning-and-litter/
+Source: https://www.phila.gov/services/trash-recycling-city-upkeep/report-a-problem-with-trash-recycling-or-city-upkeep/report-illegal-dumping/
 
 Use 311 to report dumped household items, construction debris, or trash on public property. Include the closest address, a description of the material, and photos when it is safe to do so. Do not handle hazardous materials.
 

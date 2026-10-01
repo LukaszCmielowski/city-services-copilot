@@ -5,7 +5,7 @@ Optionally add app-config.json to call deployed scoring and AutoRAG endpoints.
 """
 from __future__ import annotations
 
-import csv, json, math, re
+import csv, html, json, math, re, ssl
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +34,11 @@ def load_config():
         raise RuntimeError("app-config.json requires api_token and endpoints")
     if "endpoint_tokens" in config and not isinstance(config["endpoint_tokens"], dict):
         raise RuntimeError("app-config.json endpoint_tokens must be an object")
+    for key in ("endpoint_tls_verify", "endpoint_ca_bundles"):
+        if key in config and not isinstance(config[key], dict):
+            raise RuntimeError(f"app-config.json {key} must be an object")
+    if "tabular_feature_importance" in config and not isinstance(config["tabular_feature_importance"], dict):
+        raise RuntimeError("app-config.json tabular_feature_importance must be an object")
     return config
 
 
@@ -55,10 +60,25 @@ def call_endpoint(name, payload):
         "Accept": "application/json",
     })
     try:
-        with urlopen(request, timeout=30) as response:
+        verify_tls = APP_CONFIG.get("endpoint_tls_verify", {}).get(name, True)
+        ca_bundle = APP_CONFIG.get("endpoint_ca_bundles", {}).get(name)
+        context = ssl.create_default_context(cafile=ca_bundle) if verify_tls else ssl._create_unverified_context()
+        with urlopen(request, context=context, timeout=30) as response:
             return json.loads(response.read())
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise EndpointError(f"{name} endpoint request failed") from error
+    except HTTPError as error:
+        raise EndpointError(f"{name} endpoint returned HTTP {error.code}") from error
+    except URLError as error:
+        reason = str(error.reason)
+        if "CERTIFICATE_VERIFY_FAILED" in reason:
+            raise EndpointError(
+                f"{name} endpoint TLS certificate is not trusted; configure APP_ENDPOINT_CA_BUNDLE "
+                "or disable verification only for trusted development"
+            ) from error
+        raise EndpointError(f"{name} endpoint is unreachable: {reason}") from error
+    except TimeoutError as error:
+        raise EndpointError(f"{name} endpoint timed out") from error
+    except json.JSONDecodeError as error:
+        raise EndpointError(f"{name} endpoint returned invalid JSON") from error
 
 
 def uses_kserve_v1(name):
@@ -105,14 +125,17 @@ FORECAST_HISTORY = load_forecast_history()
 def kserve_tabular_payload(p):
     service = p.get("service", "Illegal dumping")
     days = SERVICE_BASELINES.get(service, SERVICE_BASELINES["Illegal dumping"])[0]
-    return {"instances": [{
+    row = {
         "service_type": service,
         "neighborhood": p.get("neighborhood", "Kensington"),
         "intake_channel": p.get("channel", "Mobile app"),
         "priority": p.get("priority", "Standard"),
         "opened_at": datetime.now().strftime("%Y-%m-%dT%H:%M"),
         "sla_days": round(days),
-    }]}
+    }
+    # The AutoGluon KServe v1 server consumes one list-wrapped value per field
+    # in each instance; scalar values cannot be converted into a DataFrame.
+    return {"instances": [{key: [value] for key, value in row.items()}]}
 
 
 def first_prediction(response):
@@ -128,6 +151,30 @@ def first_prediction(response):
     return prediction
 
 
+def global_feature_importance():
+    """Adapt the selected AutoML model's persisted permutation importance for the UI."""
+    metadata = APP_CONFIG.get("tabular_feature_importance", {})
+    rows = metadata.get("features", []) if isinstance(metadata, dict) else []
+    labels = {
+        "service_type": "Service type",
+        "neighborhood": "Neighborhood",
+        "intake_channel": "Intake channel",
+        "priority": "Priority",
+        "opened_at": "Request time",
+        "sla_days": "SLA days",
+    }
+    drivers = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            continue
+        try:
+            score = float(row["importance"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        drivers.append([labels.get(row["name"], row["name"].replace("_", " ").title()), f"{score:.3f}", score])
+    return drivers[:6]
+
+
 def kserve_tabular_result(response, p):
     prediction = first_prediction(response)
     positive = prediction is True or prediction == 1 or str(prediction).strip().lower() in {"1", "true", "yes"}
@@ -137,7 +184,7 @@ def kserve_tabular_result(response, p):
         "risk": risk,
         "days": round(base_days * (1.35 if positive else .8), 1),
         "band": "At risk of SLA miss" if positive else "Likely within SLA",
-        "drivers": [["AutoML predicted class", "SLA miss" if positive else "Within SLA", 100]],
+        "drivers": global_feature_importance(),
     }
 
 
@@ -201,7 +248,7 @@ def predict_request(p):
     days, base_risk, _ = SERVICE_BASELINES.get(service, SERVICE_BASELINES["Illegal dumping"])
     risk = base_risk + {"Phone":.04,"Web":.01,"Mobile app":-.02}.get(p.get("channel"), 0) + {"High":.16,"Standard":0,"Low":-.08}.get(p.get("priority"),0) + {"Kensington":.06,"Center City":-.03,"West Philadelphia":.02,"South Philadelphia":0}.get(p.get("neighborhood"),0)
     risk=max(.04,min(.86,risk)); resolution=max(1, days*(.83+risk*.58))
-    return {"risk":round(risk*100),"days":round(resolution,1),"band":"Likely within SLA" if risk<.35 else "Needs attention" if risk<.55 else "At risk of SLA miss","drivers":[["Service type",service,42],["Priority",p.get("priority","Standard"),27],["Neighborhood",p.get("neighborhood","Kensington"),18],["Intake channel",p.get("channel","Mobile app"),13]]}
+    return {"risk":round(risk*100),"days":round(resolution,1),"band":"Likely within SLA" if risk<.35 else "Needs attention" if risk<.55 else "At risk of SLA miss","drivers":[]}
 
 def forecast_volume(p):
     payload = kserve_timeseries_payload(p) if uses_kserve_v1("timeseries_scoring") else p
@@ -219,22 +266,166 @@ def retrieve_guidance(p):
         return responses_result(live)
     question=p.get("question","").lower(); tokens=set(re.findall(r"[a-z]{3,}",question))
     sources=sorted(GUIDANCE,key=lambda x:len(tokens & set(re.findall(r"[a-z]{3,}",(x["title"]+" "+x["text"]).lower()))),reverse=True)[:2]
-    answer=("For this report, submit the closest address, a clear description, and photos if it is safe. The request is routed for inspection, cleanup, or enforcement depending on what crews find. You can follow its status through 311; use 911 for an immediate hazard." if any(x in question for x in ("dump","trash","illegal")) else "311 can route this request to the responsible city team and provide status updates. Include a precise location and description; immediate hazards should go to 911.")
+    answer=("For an illegal-dumping report, confirm the closest address, a clear description, and safe-to-share photos. Route the request for inspection, cleanup, or enforcement based on field findings, and advise the resident to track its status through 311. Escalate an immediate hazard to 911." if any(x in question for x in ("dump","trash","illegal")) else "Confirm the location and description, route the request to the responsible city team, and give the resident the 311 status-tracking guidance. Escalate an immediate hazard to 911.")
     return {"answer":answer,"sources":sources}
+
+
+def markdown_inline(text):
+    """Render the small, trusted README Markdown subset without an extra dependency."""
+    escaped = html.escape(text, quote=False)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    escaped = re.sub(r"\[([^\]]+)\]\(([^ )]+)(?: \"[^\"]*\")?\)", r'<a href="\2">\1</a>', escaped)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", escaped)
+    return escaped
+
+
+def markdown_guide(markdown):
+    """Turn README.md into a lightweight, readable local setup-guide page."""
+    output, paragraph, list_kind = [], [], None
+
+    def flush_paragraph():
+        nonlocal paragraph
+        if paragraph:
+            output.append(f"<p>{markdown_inline(' '.join(part.strip() for part in paragraph))}</p>")
+            paragraph = []
+
+    def close_list():
+        nonlocal list_kind
+        if list_kind:
+            output.append(f"</{list_kind}>")
+            list_kind = None
+
+    lines = markdown.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("```"):
+            flush_paragraph(); close_list()
+            language = line[3:].strip()
+            index += 1
+            block = []
+            while index < len(lines) and not lines[index].startswith("```"):
+                block.append(lines[index]); index += 1
+            output.append(f'<pre><code class="language-{html.escape(language)}">{html.escape(chr(10).join(block))}</code></pre>')
+        elif not line.strip():
+            flush_paragraph(); close_list()
+        elif match := re.match(r"^(#{1,4})\s+(.+)$", line):
+            flush_paragraph(); close_list()
+            level = len(match.group(1))
+            output.append(f"<h{level}>{markdown_inline(match.group(2))}</h{level}>")
+        elif line.startswith("> "):
+            flush_paragraph(); close_list()
+            output.append(f"<blockquote>{markdown_inline(line[2:])}</blockquote>")
+        elif re.match(r"^\|?\s*[-:]+(?:\s*\|\s*[-:]+)+\s*\|?$", line):
+            index += 1
+            continue
+        elif line.startswith("|") and "|" in line[1:]:
+            flush_paragraph(); close_list()
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if not output or not output[-1].startswith("<table"):
+                output.append("<table><tbody>")
+            output.append("<tr>" + "".join(f"<td>{markdown_inline(cell)}</td>" for cell in cells) + "</tr>")
+            if index + 1 == len(lines) or not lines[index + 1].startswith("|"):
+                output.append("</tbody></table>")
+        elif match := re.match(r"^[-*+]\s+(.+)$", line):
+            flush_paragraph()
+            if list_kind != "ul":
+                close_list(); output.append("<ul>"); list_kind = "ul"
+            output.append(f"<li>{markdown_inline(match.group(1))}</li>")
+        elif match := re.match(r"^\d+\.\s+(.+)$", line):
+            flush_paragraph()
+            if list_kind != "ol":
+                close_list(); output.append("<ol>"); list_kind = "ol"
+            output.append(f"<li>{markdown_inline(match.group(1))}</li>")
+        elif line.startswith("!["):
+            flush_paragraph(); close_list()
+            match = re.match(r"!\[([^\]]*)\]\(([^ )]+)\)", line)
+            if match:
+                output.append(f'<img src="{html.escape(match.group(2), quote=True)}" alt="{html.escape(match.group(1), quote=True)}">')
+        else:
+            paragraph.append(line)
+        index += 1
+    flush_paragraph(); close_list()
+    return "\n".join(output)
+
+
+def setup_guide_html():
+    guide = markdown_guide((ROOT / "README.md").read_text(encoding="utf-8"))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>City Services Copilot — Setup guide</title>
+<style>
+body{{margin:0;background:#f2f5ef;color:#14221e;font:16px/1.65 system-ui,sans-serif}}main{{max-width:900px;margin:0 auto;padding:38px 30px 70px;background:#fff;min-height:100vh}}a{{color:#175b45}}h1,h2,h3,h4{{line-height:1.2;margin-top:2em}}h1{{margin-top:0;font-size:2.35rem}}h2{{border-bottom:1px solid #d9dfdb;padding-bottom:.35em}}pre{{overflow:auto;padding:16px;background:#1c2d28;color:#fff;border-radius:5px}}code{{background:#edf2ef;padding:.1em .3em;border-radius:3px}}pre code{{padding:0;background:transparent}}table{{width:100%;border-collapse:collapse;margin:1.25em 0}}td{{border:1px solid #d9dfdb;padding:.55em;vertical-align:top}}blockquote{{margin:1em 0;padding:.5em 1em;border-left:4px solid #caf172;background:#f2f5ef}}img{{max-width:100%;border:1px solid #d9dfdb;border-radius:5px}}.back{{display:inline-block;margin-bottom:2em;font-weight:700;text-decoration:none}}
+</style></head><body><main><a class="back" href="/">← Back to the demo</a>{guide}</main></body></html>"""
+
+
+def demo_page_html():
+    """Serve stable current copy for labels that explain the operator-facing demo."""
+    page = (ROOT / "index.html").read_text(encoding="utf-8")
+    replacements = {
+        'Model registry': 'How it works',
+        'href="README.md" target="_blank"': 'href="/setup" target="_blank"',
+        'MODEL EXPLANATION': 'MODEL-WIDE FEATURE IMPORTANCE',
+        'What shaped this prediction?': 'Most influential model features',
+        'AUTORAG · OFFICIAL GUIDANCE': 'AUTORAG · SERVICE GUIDANCE',
+        'What will the city do next?': 'How should this request be handled?',
+        '“What happens after I report illegal dumping?”': '“How should an operator route an illegal-dumping report?”',
+        'value="What happens after I report illegal dumping?"': 'value="How should an operator route an illegal-dumping report?"',
+        'Bundled synthetic fixture data · use the Setup Guide to upload it': 'Auto-filled for scoring: SLA target from service type · request time is captured now',
+        'NEXT 7 DAYS <span>AUTOML FORECAST</span>': 'NEXT 7 DAYS <span>GROUP DEMAND FORECAST</span>',
+        '</strong><small>expected reports</small>': '</strong><small>expected reports across all matching requests</small>',
+    }
+    for old, new in replacements.items():
+        page = page.replace(old, new)
+    return page
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**k): super().__init__(*a,directory=str(ROOT),**k)
     def log_message(self,*a): return
+    def send_json(self, status, payload):
+        body = json.dumps(payload).encode()
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser cancelled or replaced the request while the endpoint was responding.
+            pass
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path in {"/", "/index.html", "/setup", "/README.md"}:
+            body = (setup_guide_html() if path in {"/setup", "/README.md"} else demo_page_html()).encode("utf-8")
+            try:
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        super().do_GET()
     def do_POST(self):
         try:
             p=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or b"{}")
             route=urlparse(self.path).path
             result={"/api/predict":predict_request,"/api/forecast":forecast_volume,"/api/ask":retrieve_guidance}.get(route)
             if not result: self.send_error(HTTPStatus.NOT_FOUND); return
-            body=json.dumps(result(p)).encode(); self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
-        except EndpointError as e: self.send_error(HTTPStatus.BAD_GATEWAY, str(e))
-        except (ValueError,json.JSONDecodeError) as e: self.send_error(HTTPStatus.BAD_REQUEST,str(e))
+            self.send_json(HTTPStatus.OK, result(p))
+        except EndpointError as e: self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
+        except (ValueError,json.JSONDecodeError) as e: self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
 
 if __name__ == "__main__":
     print("City Services Copilot running at http://localhost:8000")
+    live_endpoints = [name for name in ("tabular_scoring", "timeseries_scoring") if APP_CONFIG.get("endpoints", {}).get(name)]
+    if live_endpoints:
+        print("Live AutoML scoring enabled: " + ", ".join(live_endpoints))
+    else:
+        print("Using bundled sample scoring results.")
+    if not APP_CONFIG.get("endpoints", {}).get("responses"):
+        print("Guidance answers are using the bundled sample corpus (AutoRAG endpoint not configured).")
     ThreadingHTTPServer(("127.0.0.1",8000),Handler).serve_forever()

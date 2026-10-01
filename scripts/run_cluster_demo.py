@@ -142,6 +142,8 @@ def config() -> dict[str, object]:
         "deploy_memory": env("AUTOML_DEPLOY_MEMORY", required=False, default="4Gi"),
         "deploy_timeout": positive_int_env("AUTOML_DEPLOY_TIMEOUT_SECONDS", 600),
         "app_config_path": app_config_path,
+        "app_endpoint_verify_ssl": bool_env("APP_ENDPOINT_VERIFY_SSL", True),
+        "app_endpoint_ca_bundle": optional_env("APP_ENDPOINT_CA_BUNDLE"),
         "embedding_models": env_list("AUTORAG_EMBEDDING_MODELS"),
         "generation_models": env_list("AUTORAG_GENERATION_MODELS"),
         "tabular_pipeline": env("RHOAI_MANAGED_PIPELINE_TABULAR", required=False, default="autogluon-tabular-training-pipeline"),
@@ -448,6 +450,28 @@ def select_best_automl_model(settings: dict[str, object], run_id: str) -> dict[s
     return chosen
 
 
+def selected_model_feature_importance(settings: dict[str, object], selected: dict[str, object]) -> list[dict[str, object]]:
+    """Read the selected tabular predictor's persisted global permutation importance."""
+    key = str(selected["predictor_prefix"]).rsplit("/predictor/", 1)[0] + "/metrics/feature_importance.json"
+    try:
+        payload = json.loads(artifact_client(settings).get_object(
+            Bucket=settings["artifact_bucket"], Key=key
+        )["Body"].read())
+    except Exception as error:
+        print(f"  Could not load tabular feature importance: {error}")
+        return []
+    values = payload.get("importance") if isinstance(payload, dict) else None
+    if not isinstance(values, dict):
+        print("  Tabular feature-importance artifact has no importance values.")
+        return []
+    rows = [
+        {"name": str(name), "importance": float(score)}
+        for name, score in values.items()
+        if isinstance(score, (int, float))
+    ]
+    return sorted(rows, key=lambda row: abs(row["importance"]), reverse=True)
+
+
 def kserve_client(settings: dict[str, object]):
     if not settings["rhoai_url"]:
         raise RuntimeError("KServe deployment requires RHOAI_URL in .env")
@@ -632,7 +656,7 @@ def inference_url(service: dict, name: str) -> str:
     return f"{base_url.rstrip('/')}/v1/models/{name}:predict"
 
 
-def update_app_config(settings: dict[str, object], endpoints: dict[str, str]) -> None:
+def update_app_config(settings: dict[str, object], endpoints: dict[str, str], tabular_importance: dict[str, object] | None = None) -> None:
     """Merge ready native KServe endpoints into the app's private configuration."""
     path = settings["app_config_path"]
     if path.exists():
@@ -655,11 +679,30 @@ def update_app_config(settings: dict[str, object], endpoints: dict[str, str]) ->
         raise RuntimeError(f"Cannot update {path.name}: endpoint_tokens must be a JSON object")
     endpoint_tokens.update({name: settings["token"] for name in endpoints})
     config["endpoint_tokens"] = endpoint_tokens
+    endpoint_tls_verify = config.get("endpoint_tls_verify") or {}
+    if not isinstance(endpoint_tls_verify, dict):
+        raise RuntimeError(f"Cannot update {path.name}: endpoint_tls_verify must be a JSON object")
+    endpoint_tls_verify.update({name: settings["app_endpoint_verify_ssl"] for name in endpoints})
+    config["endpoint_tls_verify"] = endpoint_tls_verify
+    if settings["app_endpoint_ca_bundle"]:
+        endpoint_ca_bundles = config.get("endpoint_ca_bundles") or {}
+        if not isinstance(endpoint_ca_bundles, dict):
+            raise RuntimeError(f"Cannot update {path.name}: endpoint_ca_bundles must be a JSON object")
+        endpoint_ca_bundles.update({name: settings["app_endpoint_ca_bundle"] for name in endpoints})
+        config["endpoint_ca_bundles"] = endpoint_ca_bundles
     if not isinstance(config.get("api_token"), str) or not config["api_token"].strip() or config["api_token"].startswith("replace-with-"):
         config["api_token"] = settings["token"]
+    if tabular_importance is not None:
+        config["tabular_feature_importance"] = tabular_importance
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     configured = ", ".join(sorted(endpoints))
-    print(f"  Updated {path.relative_to(ROOT)} with {configured}; it remains Git-ignored.")
+    if configured:
+        print(f"  Updated {path.relative_to(ROOT)} with {configured}; it remains Git-ignored.")
+    elif tabular_importance is not None:
+        print(f"  Updated {path.relative_to(ROOT)} with tabular feature importance; it remains Git-ignored.")
+    print("  Next: run `python3 main.py`, then open http://localhost:8000.")
+    if not config.get("endpoints", {}).get("responses"):
+        print("  AutoML scoring is live; guidance remains in bundled sample mode until AutoRAG is configured.")
 
 
 def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bool, dry_run: bool) -> None:
@@ -667,9 +710,17 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
 
     client = None if dry_run else kserve_client(settings)
     app_endpoints = {}
+    tabular_importance = None
     for run_id in run_ids:
         selected = select_best_automl_model(settings, run_id)
         kind = "tabular" if selected["pipeline"] == settings["tabular_pipeline"] else "timeseries"
+        if kind == "tabular":
+            tabular_importance = {
+                "model": selected["model"],
+                "metric": selected["metric"],
+                "score": selected["score"],
+                "features": selected_model_feature_importance(settings, selected),
+            }
         name = f"city-services-{kind}-{run_id[:8]}"
         runtime_name = runtime_for_deployment(client, settings, name, dry_run)
         body = inference_service_manifest(settings, name, selected["predictor_prefix"], runtime_name)
@@ -699,7 +750,7 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
             else:
                 print(f"  {name} is not ready yet; app configuration was not updated for it.")
     if app_endpoints and not dry_run:
-        update_app_config(settings, app_endpoints)
+        update_app_config(settings, app_endpoints, tabular_importance if "tabular_scoring" in app_endpoints else None)
 
 
 def spinner_wait(seconds: int, states: dict[str, str]) -> None:

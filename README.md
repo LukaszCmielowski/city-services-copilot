@@ -98,7 +98,19 @@ With `--wait-deploy` in an interactive terminal, readiness is shown with one in-
 
 This is an explicit cluster write: for each endpoint, it clones the OpenShift AI `autogluon-runtime-template` into a namespace-scoped `ServingRuntime` with the same name, waits for KServe to index it, then creates the matching `InferenceService` in `RHOAI_PROJECT_NAME`. The template is read from `redhat-ods-applications` by default. The command also reuses an existing KServe-compatible object-storage data connection (`AUTOML_KSERVE_STORAGE_KEY`, defaulting to `AUTOML_S3_SECRET_NAME`) and its service account (default `<storage-key>-sa`). The connection must have read access to the pipeline-artifact bucket. To reuse a platform-provided runtime instead, set `AUTOML_SERVING_RUNTIME_NAME` and set `AUTOML_CREATE_SERVING_RUNTIME=false`. The script never creates or alters secrets, service accounts, or Model Registry records.
 
-When a deployed service becomes ready, the runner updates the Git-ignored `app-config.json` (or `DEMO_APP_CONFIG_PATH`) with its KServe v1 scoring URI and a per-endpoint copy of the existing `RHOAI_TOKEN`. It preserves any existing AutoRAG `responses` endpoint and its default `api_token`. The app recognizes `endpoint_protocol: "kserve-v1"`, converts the UI request into the AutoGluon training schema and KServe `instances` payload, and adapts the native prediction response back to the UI. Start `python3 main.py` after deployment to use those configured scoring services.
+When a deployed service becomes ready, the runner updates the Git-ignored `app-config.json` (or `DEMO_APP_CONFIG_PATH`) with its KServe v1 scoring URI and a per-endpoint copy of the existing `RHOAI_TOKEN`. It preserves any existing AutoRAG `responses` endpoint and its default `api_token`. For the tabular model, it also copies the selected predictor's persisted global permutation feature importance from `metrics/feature_importance.json`. The app recognizes `endpoint_protocol: "kserve-v1"`, converts the UI request into the AutoGluon training schema and KServe `instances` payload, and adapts the native prediction response back to the UI.
+
+### Start the web app with live AutoML scoring
+
+After `--wait-deploy` completes, start the local backend:
+
+```bash
+python3 main.py
+```
+
+Open [http://localhost:8000](http://localhost:8000), choose a service request, and select **Analyze request**. The operator enters four available facts: service type, neighborhood, intake channel, and priority. The backend derives the remaining two tabular-model fields: `sla_days` from the selected service type and `opened_at` from the current submission time. The risk card is a prediction for that one request; the demand card is a separate group forecast for all matching requests in the selected service type and neighborhood. Startup output confirms `Live AutoML scoring enabled` when both generated scoring URLs are configured. The action calls the deployed tabular and time-series scoring endpoints; while it runs, the request-outlook label says `Updating live scoring…`. If either endpoint rejects the request or is unavailable, that label shows `Scoring unavailable: …` instead of leaving stale results on screen. The feature panel lists global feature-importance scores from the selected tabular model; a larger score means the model relies more on that field overall. These are not per-request attributions. At this stage, the guidance panel deliberately remains in its bundled sample mode until the AutoRAG pattern is deployed and configured.
+
+The runner keeps TLS verification enabled for scoring endpoints. For a cluster with a private CA, set `APP_ENDPOINT_CA_BUNDLE` to its PEM path before deployment; set `APP_ENDPOINT_VERIFY_SSL=false` only in a trusted development environment. If endpoints were deployed before this runner version, re-run the same `--deploy ... --wait-deploy` command: it reuses the resources and refreshes `app-config.json`.
 
 For the runs printed by the example submission, use one line to avoid shell line-continuation mistakes:
 
@@ -290,7 +302,7 @@ Open [http://localhost:8000](http://localhost:8000). Change a service type and c
 
 ### Enable live mode
 
-Deploy the selected tabular and time-series AutoML models as scoring endpoints. The application backend sends each new service-request payload to those endpoints at request time; it does not load model artifacts or score in the browser. Deploy the selected AutoRAG pattern behind an inference endpoint in the same way.
+Deploy the selected tabular and time-series AutoML models as scoring endpoints. The application backend sends each new service-request payload to those endpoints at request time; it does not load model artifacts or score in the browser. AutoRAG deployment is a separate later step.
 
 For this sample, the user only needs to provide an API key/token and the three endpoint URIs. Copy the template and fill in those values:
 

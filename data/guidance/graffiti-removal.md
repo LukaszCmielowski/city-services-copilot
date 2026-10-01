@@ -1,6 +1,6 @@
 # Report graffiti
 
-Source: https://www.phila.gov/services/working-jobs/cleaning-and-litter/report-graffiti/
+Source: https://www.phila.gov/services/streets-sidewalks-alleys/report-a-problem-on-a-city-street-sidewalk-or-alley/report-graffiti/
 
 Use 311 to report graffiti on public property or to request help with eligible graffiti removal. Include the location, property type, a description, and photos when they can be captured safely. The city may need owner permission or additional information for private property.
 
