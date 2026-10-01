@@ -361,24 +361,8 @@ body{{margin:0;background:#f2f5ef;color:#14221e;font:16px/1.65 system-ui,sans-se
 
 
 def demo_page_html():
-    """Serve stable current copy for labels that explain the operator-facing demo."""
-    page = (ROOT / "index.html").read_text(encoding="utf-8")
-    replacements = {
-        'Model registry': 'How it works',
-        'href="README.md" target="_blank"': 'href="/setup" target="_blank"',
-        'MODEL EXPLANATION': 'MODEL-WIDE FEATURE IMPORTANCE',
-        'What shaped this prediction?': 'Most influential model features',
-        'AUTORAG · OFFICIAL GUIDANCE': 'AUTORAG · SERVICE GUIDANCE',
-        'What will the city do next?': 'How should this request be handled?',
-        '“What happens after I report illegal dumping?”': '“How should an operator route an illegal-dumping report?”',
-        'value="What happens after I report illegal dumping?"': 'value="How should an operator route an illegal-dumping report?"',
-        'Bundled synthetic fixture data · use the Setup Guide to upload it': 'Auto-filled for scoring: SLA target from service type · request time is captured now',
-        'NEXT 7 DAYS <span>AUTOML FORECAST</span>': 'NEXT 7 DAYS <span>GROUP DEMAND FORECAST</span>',
-        '</strong><small>expected reports</small>': '</strong><small>expected reports across all matching requests</small>',
-    }
-    for old, new in replacements.items():
-        page = page.replace(old, new)
-    return page
+    """Read the checked-in, operator-facing home page without browser caching."""
+    return (ROOT / "index.html").read_text(encoding="utf-8")
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**k): super().__init__(*a,directory=str(ROOT),**k)

@@ -2,10 +2,9 @@ let channel = 'Mobile app';
 let priority = 'Standard';
 const $ = selector => document.querySelector(selector);
 
-$('.drivers .eyebrow').textContent = 'MODEL-WIDE VALIDATION CHECK';
-$('.drivers h3').textContent = 'What data helps the model most?';
+$('.drivers .eyebrow').textContent = 'GLOBAL FEATURE IMPORTANCE';
+$('.drivers h3').textContent = 'Model feature importance';
 $('.nav-links a[href="#model"]').textContent = 'How it works';
-$('.nav-links a[href="README.md"]').href = '/setup';
 $('.rag .eyebrow').textContent = 'AUTORAG · SERVICE GUIDANCE';
 $('.rag h3').textContent = 'How should this request be handled?';
 $('.question').textContent = '“How should an operator route an illegal-dumping report?”';
@@ -95,10 +94,4 @@ $('#ask-form').addEventListener('submit', async event => {
     console.error(error);
     $('#answer').textContent = `Guidance unavailable: ${error.message}`;
   }
-});
-
-refresh();
-post('/api/ask', { question: $('#question').value }).then(renderAnswer).catch(error => {
-  console.error(error);
-  $('#answer').textContent = `Guidance unavailable: ${error.message}`;
 });

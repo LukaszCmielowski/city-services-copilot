@@ -18,7 +18,7 @@ This demo brings those views together around one representative scenario: a resi
 
 - **Resolution-risk prediction:** a tabular AutoML model estimates the likelihood that the request misses its SLA and an expected resolution time.
 - **Demand forecast:** an AutoML time-series model estimates the next seven days of reports for the selected service type.
-- **Grounded next-step answer:** AutoRAG retrieves the relevant bundled 311 guidance and returns an answer with source links.
+- **Operator guidance:** AutoRAG retrieves relevant bundled 311 guidance to support routing and resident communication, with source links.
 
 The bundled fixtures are synthetic and the sample-mode results are illustrative. The demo is designed to show the integration pattern—not to make operational decisions or represent live City of Philadelphia service levels. In a production deployment, replace the fixtures with approved, governed data; validate performance and fairness; and connect the app to the selected deployed model and RAG pattern.
 
@@ -37,7 +37,7 @@ After the one-time platform prerequisites are ready, the demo user only needs to
    python3 -m pip install -r requirements-cluster.txt
    ```
 
-   Fill `.env` with the cluster or KFP route and token, S3 connection, existing Kubernetes-secret names, MaaS/vector-database secret names, and model IDs. Set `RHOAI_KFP_URL` directly, or set `RHOAI_URL` and let the runner discover the existing `ds-pipeline` OpenShift Route in the project.
+   Fill only the values shown in `.env`: cluster URL, token, project, S3 endpoint/credentials/bucket, one shared `S3_CONNECTION_NAME`, MaaS/vector-database connection names, and MaaS model IDs. The runner discovers the existing `ds-pipeline` Route from `RHOAI_URL` and derives the remaining demo defaults.
 
 2. Review the planned upload and submissions, then execute them:
 
@@ -67,12 +67,16 @@ To upload the bundled fixtures and submit all three managed pipeline runs from o
 ```bash
 python3 -m pip install -r requirements-cluster.txt
 cp .env.example .env
-# Edit .env with the cluster, S3, Kubernetes-secret, MaaS, vector-database, and model values.
+# Edit only the values shown in .env.example.
 python3 scripts/run_cluster_demo.py --dry-run
 python3 scripts/run_cluster_demo.py
 ```
 
 The dry run validates the bundled data and configuration, then shows a compact submission plan—pipeline, S3 inputs, existing connection names, targets, and selected models—without writing to the cluster. Add `--show-parameters` only when troubleshooting and you need the full KFP parameter JSON. The normal command uploads the bundled synthetic CSVs, documents, and evaluation JSON; then submits the tabular AutoML, time-series AutoML, and AutoRAG managed pipelines. After submission in an interactive terminal, it asks whether to watch all runs. When successful tabular or time-series runs finish, it asks whether to deploy their selected models as KServe scoring endpoints; that deployment prompt defaults to **No**. Use `--wait` to start watching without the first prompt, `--non-interactive` for unattended submission, `--only tabular`, `--only timeseries`, or `--only autorag` to run one pipeline, and `--skip-upload` only after a successful upload.
+
+### Optional advanced configuration
+
+The short `.env.example` is the supported default. Add an override only when the default does not match your platform: `RHOAI_KFP_URL` for a direct pipeline URL; `AUTOML_S3_SECRET_NAME`, `AUTORAG_TEST_S3_SECRET_NAME`, `AUTORAG_DOCUMENTS_S3_SECRET_NAME`, or `AUTOML_KSERVE_STORAGE_KEY` when those stages use different S3 connections; `PIPELINE_ARTIFACTS_S3_BUCKET` and `PIPELINE_ARTIFACTS_S3_PREFIX` when artifacts are stored separately; or the TLS, runtime, pipeline-name, and preset variables documented inline in `scripts/run_cluster_demo.py`. Existing `.env` files using the former specific S3 variables remain supported.
 
 ### Monitor submitted runs and leaderboards
 
@@ -96,7 +100,7 @@ Add `--dry-run` to inspect the chosen model and generated `InferenceService` man
 
 With `--wait-deploy` in an interactive terminal, readiness is shown with one in-place spinner rather than repeated KServe status lines. It prints the endpoint URL once the service is ready.
 
-This is an explicit cluster write: for each endpoint, it clones the OpenShift AI `autogluon-runtime-template` into a namespace-scoped `ServingRuntime` with the same name, waits for KServe to index it, then creates the matching `InferenceService` in `RHOAI_PROJECT_NAME`. The template is read from `redhat-ods-applications` by default. The command also reuses an existing KServe-compatible object-storage data connection (`AUTOML_KSERVE_STORAGE_KEY`, defaulting to `AUTOML_S3_SECRET_NAME`) and its service account (default `<storage-key>-sa`). The connection must have read access to the pipeline-artifact bucket. To reuse a platform-provided runtime instead, set `AUTOML_SERVING_RUNTIME_NAME` and set `AUTOML_CREATE_SERVING_RUNTIME=false`. The script never creates or alters secrets, service accounts, or Model Registry records.
+This is an explicit cluster write: for each endpoint, it clones the OpenShift AI `autogluon-runtime-template` into a namespace-scoped `ServingRuntime` with the same name, waits for KServe to index it, then creates the matching `InferenceService` in `RHOAI_PROJECT_NAME`. The command reuses the one existing object-storage connection named by `S3_CONNECTION_NAME` for AutoML, AutoRAG, and KServe deployment; its default service account is `<S3_CONNECTION_NAME>-sa`. That connection must have read access to the pipeline-artifact bucket. To reuse a platform-provided runtime instead, set `AUTOML_SERVING_RUNTIME_NAME` and set `AUTOML_CREATE_SERVING_RUNTIME=false`. The script never creates or alters secrets, service accounts, or Model Registry records.
 
 When a deployed service becomes ready, the runner updates the Git-ignored `app-config.json` (or `DEMO_APP_CONFIG_PATH`) with its KServe v1 scoring URI and a per-endpoint copy of the existing `RHOAI_TOKEN`. It preserves any existing AutoRAG `responses` endpoint and its default `api_token`. For the tabular model, it also copies the selected predictor's persisted global permutation feature importance from `metrics/feature_importance.json`. The app recognizes `endpoint_protocol: "kserve-v1"`, converts the UI request into the AutoGluon training schema and KServe `instances` payload, and adapts the native prediction response back to the UI.
 
@@ -108,7 +112,7 @@ After `--wait-deploy` completes, start the local backend:
 python3 main.py
 ```
 
-Open [http://localhost:8000](http://localhost:8000), choose a service request, and select **Analyze request**. The operator enters four available facts: service type, neighborhood, intake channel, and priority. The backend derives the remaining two tabular-model fields: `sla_days` from the selected service type and `opened_at` from the current submission time. The risk card is a prediction for that one request; the demand card is a separate group forecast for all matching requests in the selected service type and neighborhood. Startup output confirms `Live AutoML scoring enabled` when both generated scoring URLs are configured. The action calls the deployed tabular and time-series scoring endpoints; while it runs, the request-outlook label says `Updating live scoring…`. If either endpoint rejects the request or is unavailable, that label shows `Scoring unavailable: …` instead of leaving stale results on screen. The feature panel lists global feature-importance scores from the selected tabular model; a larger score means the model relies more on that field overall. These are not per-request attributions. At this stage, the guidance panel deliberately remains in its bundled sample mode until the AutoRAG pattern is deployed and configured.
+Open [http://localhost:8000](http://localhost:8000), choose a service request, and select **Analyze request**. The operator enters four available facts: service type, neighborhood, intake channel, and priority. The backend derives the remaining two tabular-model fields: `sla_days` from the selected service type and `opened_at` from the current submission time. The risk card is a prediction for that one request; the demand card is a separate group forecast for all matching requests in the selected service type and neighborhood. Startup output confirms `Live AutoML scoring enabled` when both generated scoring URLs are configured. The app does not call either scoring endpoint on page load; **Analyze request** calls both endpoints. While it runs, the request-outlook label says `Updating live scoring…`. If either endpoint rejects the request or is unavailable, that label shows `Scoring unavailable: …` instead of leaving stale results on screen. The feature panel lists global feature-importance scores from the selected tabular model; a larger score means the model relies more on that field overall. These are not per-request attributions. At this stage, the guidance panel deliberately remains in its bundled sample mode until the AutoRAG pattern is deployed and configured.
 
 The runner keeps TLS verification enabled for scoring endpoints. For a cluster with a private CA, set `APP_ENDPOINT_CA_BUNDLE` to its PEM path before deployment; set `APP_ENDPOINT_VERIFY_SSL=false` only in a trusted development environment. If endpoints were deployed before this runner version, re-run the same `--deploy ... --wait-deploy` command: it reuses the resources and refreshes `app-config.json`.
 
@@ -161,7 +165,7 @@ Ask the platform administrator to confirm each item before data preparation:
 - A pipeline server can run the managed AutoML and AutoRAG pipelines, or matching definitions have been imported. If using the dashboard, the AutoML and Gen AI/AutoRAG views are enabled.
 - Compute quota supports the `speed` preset (4 vCPU, 16 GiB) and, if used, `balanced` (8 vCPU, 32 GiB).
 - An AutoML S3 secret exists with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_ENDPOINT`, and `AWS_DEFAULT_REGION`.
-- AutoRAG has S3 secrets for both test data and documents. Each needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_S3_ENDPOINT`; region is optional.
+- One existing S3 connection, named in `.env` as `S3_CONNECTION_NAME`, is available to AutoML, AutoRAG evaluation/documents, and KServe deployment. It contains `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_S3_ENDPOINT`; region is optional. Use the documented advanced overrides only when those stages genuinely use different connections.
 - A MaaS secret exists with `MAAS_BASE_URL` and `MAAS_API_KEY`.
 - A remote Milvus secret (`MILVUS_*`, minimum `MILVUS_URI`) or PGVector secret (`PGVECTOR_*`) exists. Inline vector databases are unsupported.
 - You know at least one embedding-model ID and one generation-model ID exposed by MaaS. The AutoRAG pipeline requires explicit lists.
@@ -302,7 +306,7 @@ Open [http://localhost:8000](http://localhost:8000). Change a service type and c
 
 ### Enable live mode
 
-Deploy the selected tabular and time-series AutoML models as scoring endpoints. The application backend sends each new service-request payload to those endpoints at request time; it does not load model artifacts or score in the browser. AutoRAG deployment is a separate later step.
+Deploy the selected tabular and time-series AutoML models as scoring endpoints. The application backend sends an incoming request's payload to those endpoints when the operator selects **Analyze request**; it does not load model artifacts or score in the browser. AutoRAG deployment is a separate later step.
 
 For this sample, the user only needs to provide an API key/token and the three endpoint URIs. Copy the template and fill in those values:
 

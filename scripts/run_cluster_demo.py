@@ -102,8 +102,11 @@ def config() -> dict[str, object]:
     bucket = env("AWS_S3_BUCKET")
     kfp_url = optional_env("RHOAI_KFP_URL").rstrip("/")
     rhoai_url = optional_env("RHOAI_URL").rstrip("/")
+    s3_connection = optional_env("S3_CONNECTION_NAME") or optional_env("AUTOML_S3_SECRET_NAME")
     if not kfp_url and not rhoai_url:
         raise RuntimeError("Set RHOAI_KFP_URL, or set RHOAI_URL to discover the existing pipeline Route")
+    if not s3_connection:
+        raise RuntimeError("Set S3_CONNECTION_NAME (the existing Kubernetes S3 connection used by this demo)")
     app_config_name = optional_env("DEMO_APP_CONFIG_PATH", "app-config.json")
     app_config_path = (ROOT / app_config_name).resolve()
     if ROOT.resolve() not in app_config_path.parents:
@@ -127,12 +130,14 @@ def config() -> dict[str, object]:
         "artifact_bucket": optional_env("PIPELINE_ARTIFACTS_S3_BUCKET") or bucket,
         "artifact_prefix": optional_env("PIPELINE_ARTIFACTS_S3_PREFIX").strip("/"),
         "prefix": prefix,
-        "automl_secret": env("AUTOML_S3_SECRET_NAME"),
-        "autorag_test_secret": env("AUTORAG_TEST_S3_SECRET_NAME"),
-        "autorag_documents_secret": env("AUTORAG_DOCUMENTS_S3_SECRET_NAME"),
+        # One shared connection is the normal demo path.  The legacy, more
+        # specific variables remain optional overrides for advanced setups.
+        "automl_secret": optional_env("AUTOML_S3_SECRET_NAME") or s3_connection,
+        "autorag_test_secret": optional_env("AUTORAG_TEST_S3_SECRET_NAME") or s3_connection,
+        "autorag_documents_secret": optional_env("AUTORAG_DOCUMENTS_S3_SECRET_NAME") or s3_connection,
         "maas_secret": env("MAAS_SECRET_NAME"),
         "vector_db_secret": env("VECTOR_DB_SECRET_NAME"),
-        "kserve_storage_key": env("AUTOML_KSERVE_STORAGE_KEY", required=False, default=env("AUTOML_S3_SECRET_NAME")),
+        "kserve_storage_key": optional_env("AUTOML_KSERVE_STORAGE_KEY") or s3_connection,
         "serving_runtime": optional_env("AUTOML_SERVING_RUNTIME_NAME"),
         "create_serving_runtime": bool_env("AUTOML_CREATE_SERVING_RUNTIME", True),
         "serving_runtime_template": env("AUTOML_SERVING_RUNTIME_TEMPLATE_NAME", required=False, default="autogluon-runtime-template"),
