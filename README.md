@@ -94,7 +94,9 @@ python3 scripts/run_cluster_demo.py --deploy TABULAR_RUN_ID TIMESERIES_RUN_ID --
 
 Add `--dry-run` to inspect the chosen model and generated `InferenceService` manifest without creating anything; it only reads the model artifacts from object storage.
 
-This is an explicit cluster write: it creates `city-services-tabular-<first-8-run-id>` and `city-services-timeseries-<first-8-run-id>` in `RHOAI_PROJECT_NAME`. The command reuses an existing KServe-compatible object-storage data connection (`AUTOML_KSERVE_STORAGE_KEY`, defaulting to `AUTOML_S3_SECRET_NAME`), its service account (default `<storage-key>-sa`), and `AUTOML_SERVING_RUNTIME_NAME`. The connection must have read access to the pipeline-artifact bucket, and the named serving runtime must already support AutoGluon. The script does not create or alter secrets, service accounts, serving runtimes, or Model Registry records.
+With `--wait-deploy` in an interactive terminal, readiness is shown with one in-place spinner rather than repeated KServe status lines. It prints the endpoint URL once the service is ready.
+
+This is an explicit cluster write: for each endpoint, it clones the OpenShift AI `autogluon-runtime-template` into a namespace-scoped `ServingRuntime` with the same name, waits for KServe to index it, then creates the matching `InferenceService` in `RHOAI_PROJECT_NAME`. The template is read from `redhat-ods-applications` by default. The command also reuses an existing KServe-compatible object-storage data connection (`AUTOML_KSERVE_STORAGE_KEY`, defaulting to `AUTOML_S3_SECRET_NAME`) and its service account (default `<storage-key>-sa`). The connection must have read access to the pipeline-artifact bucket. To reuse a platform-provided runtime instead, set `AUTOML_SERVING_RUNTIME_NAME` and set `AUTOML_CREATE_SERVING_RUNTIME=false`. The script never creates or alters secrets, service accounts, or Model Registry records.
 
 When a deployed service becomes ready, the runner updates the Git-ignored `app-config.json` (or `DEMO_APP_CONFIG_PATH`) with its KServe v1 scoring URI and a per-endpoint copy of the existing `RHOAI_TOKEN`. It preserves any existing AutoRAG `responses` endpoint and its default `api_token`. The app recognizes `endpoint_protocol: "kserve-v1"`, converts the UI request into the AutoGluon training schema and KServe `instances` payload, and adapts the native prediction response back to the UI. Start `python3 main.py` after deployment to use those configured scoring services.
 
@@ -108,9 +110,8 @@ If you need to remove these demo endpoints later, delete only the two named reso
 
 ```bash
 oc delete inferenceservice city-services-tabular-840dbfed city-services-timeseries-59967b67 -n YOUR_PROJECT
+oc delete servingruntime city-services-tabular-840dbfed city-services-timeseries-59967b67 -n YOUR_PROJECT
 ```
-
-The native AutoGluon KServe APIs return model-specific prediction payloads. Before enabling live mode in this app, place the small request/response adapter described in [Enable live mode](#enable-live-mode) in front of each endpoint so it implements the app's `/api/predict` and `/api/forecast` contracts.
 
 The runner does **not** download public datasets or create/modify Kubernetes secrets. It can read OpenShift Routes when using `RHOAI_URL` discovery, but does not create a DSPA or a Route. Those connections and secret names must already exist in the project. `.env` is Git-ignored; do not share it or commit credentials.
 

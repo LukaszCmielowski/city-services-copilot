@@ -133,7 +133,10 @@ def config() -> dict[str, object]:
         "maas_secret": env("MAAS_SECRET_NAME"),
         "vector_db_secret": env("VECTOR_DB_SECRET_NAME"),
         "kserve_storage_key": env("AUTOML_KSERVE_STORAGE_KEY", required=False, default=env("AUTOML_S3_SECRET_NAME")),
-        "serving_runtime": env("AUTOML_SERVING_RUNTIME_NAME", required=False, default="kserve-autogluonserver"),
+        "serving_runtime": optional_env("AUTOML_SERVING_RUNTIME_NAME"),
+        "create_serving_runtime": bool_env("AUTOML_CREATE_SERVING_RUNTIME", True),
+        "serving_runtime_template": env("AUTOML_SERVING_RUNTIME_TEMPLATE_NAME", required=False, default="autogluon-runtime-template"),
+        "serving_runtime_template_namespace": env("AUTOML_SERVING_RUNTIME_TEMPLATE_NAMESPACE", required=False, default="redhat-ods-applications"),
         "kserve_service_account": env("AUTOML_KSERVE_SERVICE_ACCOUNT", required=False),
         "deploy_cpu": env("AUTOML_DEPLOY_CPU", required=False, default="2"),
         "deploy_memory": env("AUTOML_DEPLOY_MEMORY", required=False, default="4Gi"),
@@ -460,7 +463,91 @@ def kserve_client(settings: dict[str, object]):
     return client.CustomObjectsApi(client.ApiClient(kube_config))
 
 
-def inference_service_manifest(settings: dict[str, object], name: str, predictor_prefix: str) -> dict:
+def serving_runtime_exists(client, settings: dict[str, object], name: str) -> bool:
+    from kubernetes.client.rest import ApiException
+
+    try:
+        client.get_namespaced_custom_object(
+            group="serving.kserve.io", version="v1alpha1", namespace=settings["project"],
+            plural="servingruntimes", name=name, _request_timeout=30,
+        )
+        return True
+    except ApiException as error:
+        if error.status == 404:
+            return False
+        raise RuntimeError(f"Could not check ServingRuntime {name!r}: HTTP {error.status}") from error
+
+
+def create_serving_runtime_from_template(client, settings: dict[str, object], runtime_name: str) -> bool:
+    """Clone the OpenShift AI AutoGluon runtime template into the demo project."""
+    if serving_runtime_exists(client, settings, runtime_name):
+        print(f"Reusing existing ServingRuntime {runtime_name}.")
+        return False
+    template_name = settings["serving_runtime_template"]
+    template_namespace = settings["serving_runtime_template_namespace"]
+    try:
+        template = client.get_namespaced_custom_object(
+            group="template.openshift.io", version="v1", namespace=template_namespace,
+            plural="templates", name=template_name, _request_timeout=30,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not read OpenShift Template {template_name!r} in {template_namespace!r}. "
+            "Ask a platform administrator for access, or set AUTOML_SERVING_RUNTIME_NAME "
+            "to an existing namespace-scoped AutoGluon ServingRuntime and set "
+            "AUTOML_CREATE_SERVING_RUNTIME=false."
+        ) from error
+    embedded = next((item for item in template.get("objects", []) if item.get("kind") == "ServingRuntime" and item.get("apiVersion") == "serving.kserve.io/v1alpha1"), None)
+    if embedded is None:
+        raise RuntimeError(f"OpenShift Template {template_name!r} contains no ServingRuntime object")
+    allowed_annotations = {
+        "opendatahub.io/apiProtocol", "opendatahub.io/runtime-version", "openshift.io/display-name",
+        "monitoring.opendatahub.io/scrape", "opendatahub.io/kserve-runtime",
+        "prometheus.io/path", "prometheus.io/port",
+    }
+    runtime = {
+        "apiVersion": "serving.kserve.io/v1alpha1",
+        "kind": "ServingRuntime",
+        "metadata": {
+            "name": runtime_name,
+            "namespace": settings["project"],
+            "annotations": {key: value for key, value in (embedded.get("metadata", {}).get("annotations", {}) or {}).items() if key in allowed_annotations},
+            "labels": {"opendatahub.io/dashboard": "true"},
+        },
+        "spec": embedded.get("spec"),
+    }
+    client.create_namespaced_custom_object(
+        group="serving.kserve.io", version="v1alpha1", namespace=settings["project"],
+        plural="servingruntimes", body=runtime, _request_timeout=30,
+    )
+    print(f"Created ServingRuntime {runtime_name} from template {template_name}.")
+    return True
+
+
+def runtime_for_deployment(client, settings: dict[str, object], endpoint_name: str, dry_run: bool) -> str:
+    """Resolve an explicit runtime or provision the AutoGluon template runtime for one endpoint."""
+    explicit_runtime = settings["serving_runtime"]
+    if explicit_runtime:
+        if not dry_run and not serving_runtime_exists(client, settings, explicit_runtime):
+            raise RuntimeError(
+                f"Configured AUTOML_SERVING_RUNTIME_NAME {explicit_runtime!r} does not exist in {settings['project']!r}."
+            )
+        return explicit_runtime
+    if not settings["create_serving_runtime"]:
+        raise RuntimeError(
+            "Set AUTOML_SERVING_RUNTIME_NAME to an existing AutoGluon ServingRuntime, or set "
+            "AUTOML_CREATE_SERVING_RUNTIME=true to create one from the configured template."
+        )
+    if dry_run:
+        return endpoint_name
+    created = create_serving_runtime_from_template(client, settings, endpoint_name)
+    if created:
+        print("Waiting 30s for KServe to index the new ServingRuntime...", flush=True)
+        endpoint_spinner_wait(30, endpoint_name, "initializing runtime")
+    return endpoint_name
+
+
+def inference_service_manifest(settings: dict[str, object], name: str, predictor_prefix: str, runtime_name: str) -> dict:
     storage_key = settings["kserve_storage_key"]
     service_account = settings["kserve_service_account"] or f"{storage_key}-sa"
     return {
@@ -486,7 +573,7 @@ def inference_service_manifest(settings: dict[str, object], name: str, predictor
             "minReplicas": 1, "maxReplicas": 1,
             "model": {
                 "modelFormat": {"name": "autogluon", "version": "1"},
-                "runtime": settings["serving_runtime"],
+                "runtime": runtime_name,
                 "resources": {"requests": {"cpu": settings["deploy_cpu"], "memory": settings["deploy_memory"]}, "limits": {"cpu": settings["deploy_cpu"], "memory": settings["deploy_memory"]}},
                 "storage": {"key": storage_key, "path": predictor_prefix.rstrip("/")},
             },
@@ -584,9 +671,12 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
         selected = select_best_automl_model(settings, run_id)
         kind = "tabular" if selected["pipeline"] == settings["tabular_pipeline"] else "timeseries"
         name = f"city-services-{kind}-{run_id[:8]}"
-        body = inference_service_manifest(settings, name, selected["predictor_prefix"])
+        runtime_name = runtime_for_deployment(client, settings, name, dry_run)
+        body = inference_service_manifest(settings, name, selected["predictor_prefix"], runtime_name)
         if dry_run:
-            print(f"Would create {name} from {selected['model']} ({selected['metric']}={selected['score']}):")
+            if not settings["serving_runtime"]:
+                print(f"Would create ServingRuntime {runtime_name} from template {settings['serving_runtime_template']}.")
+            print(f"Would create {name} from {selected['model']} ({selected['metric']}={selected['score']}) using runtime {runtime_name}:")
             print(json.dumps(body, indent=2))
             continue
         try:
@@ -740,7 +830,7 @@ def parameters(settings: dict[str, object]) -> dict[str, dict[str, object]]:
 def print_submission_plan(pipelines: dict[str, object], run_parameters: dict[str, dict[str, object]], selected: list[str], show_parameters: bool) -> None:
     """Render the dry-run plan in terms a demo user can verify at a glance."""
     titles = {"tabular": "Tabular AutoML — SLA-miss risk", "timeseries": "Time-series AutoML — request demand", "autorag": "AutoRAG — grounded service guidance"}
-    print("\n" + paint("DRY RUN — no data will be uploaded and no pipeline runs will be created.", "1;33"))
+    print("\n" + paint("PREFLIGHT PREVIEW — no changes have been made yet.", "1;33"))
     print(paint("Submission plan", "1"))
     for index, name in enumerate(selected, start=1):
         params = run_parameters[name]
