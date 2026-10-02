@@ -355,15 +355,11 @@ def report_leaderboard(settings: dict[str, object], run_id: str) -> None:
         bucket = settings["artifact_bucket"]
         metric_keys = []
         html_keys = []
-        for pipeline_name, folder in (
-            (settings["tabular_pipeline"], "autogluon-models-training"),
-            (settings["tabular_pipeline"], "autogluon-models-training-2"),
-            (settings["tabular_pipeline"], "leaderboard-evaluation"),
-            (settings["timeseries_pipeline"], "autogluon-timeseries-models-training"),
-            (settings["timeseries_pipeline"], "autogluon-timeseries-models-training-2"),
-            (settings["timeseries_pipeline"], "timeseries-leaderboard-evaluation"),
-        ):
-            keys = list_s3_keys(client, bucket, artifact_prefix(settings, f"{pipeline_name}/{run_id}/{folder}/"))
+        for pipeline_name in (settings["tabular_pipeline"], settings["timeseries_pipeline"]):
+            # Component task names gain numeric suffixes as pipeline definitions evolve
+            # (for example, autogluon-timeseries-models-training-3).  Search the
+            # completed run rather than assuming a particular generation suffix.
+            keys = list_s3_keys(client, bucket, artifact_prefix(settings, f"{pipeline_name}/{run_id}/"))
             metric_keys.extend(key for key in keys if "/models_artifact/" in key and key.endswith("/metrics/metrics.json"))
             html_keys.extend(key for key in keys if "html_artifact" in key)
         if metric_keys:
@@ -426,25 +422,21 @@ def select_best_automl_model(settings: dict[str, object], run_id: str) -> dict[s
     client = artifact_client(settings)
     bucket = settings["artifact_bucket"]
     candidates = []
-    for pipeline_name, folders in {
-        settings["tabular_pipeline"]: ("autogluon-models-training", "autogluon-models-training-2"),
-        settings["timeseries_pipeline"]: ("autogluon-timeseries-models-training", "autogluon-timeseries-models-training-2"),
-    }.items():
-        for folder in folders:
-            prefix = artifact_prefix(settings, f"{pipeline_name}/{run_id}/{folder}/")
-            for key in list_s3_keys(client, bucket, prefix):
-                if not key.endswith("/metrics/metrics.json") or "/models_artifact/" not in key:
-                    continue
-                metrics = json.loads(client.get_object(Bucket=bucket, Key=key)["Body"].read())
-                metric_name = next((name for name in ("score_val", "score_test", "accuracy", "roc_auc", "mean_absolute_scaled_error", "weighted_quantile_loss") if metrics.get(name) is not None), None)
-                if metric_name is None or not isinstance(metrics[metric_name], (int, float)):
-                    continue
-                model = key.split("/models_artifact/", 1)[1].split("/", 1)[0]
-                predictor_prefix = key.rsplit("/metrics/metrics.json", 1)[0] + "/predictor/"
-                candidates.append({
-                    "pipeline": pipeline_name, "model": model, "metric": metric_name,
-                    "score": metrics[metric_name], "predictor_prefix": predictor_prefix,
-                })
+    for pipeline_name in (settings["tabular_pipeline"], settings["timeseries_pipeline"]):
+        prefix = artifact_prefix(settings, f"{pipeline_name}/{run_id}/")
+        for key in list_s3_keys(client, bucket, prefix):
+            if not key.endswith("/metrics/metrics.json") or "/models_artifact/" not in key:
+                continue
+            metrics = json.loads(client.get_object(Bucket=bucket, Key=key)["Body"].read())
+            metric_name = next((name for name in ("score_val", "score_test", "accuracy", "roc_auc", "mean_absolute_scaled_error", "weighted_quantile_loss") if metrics.get(name) is not None), None)
+            if metric_name is None or not isinstance(metrics[metric_name], (int, float)):
+                continue
+            model = key.split("/models_artifact/", 1)[1].split("/", 1)[0]
+            predictor_prefix = key.rsplit("/metrics/metrics.json", 1)[0] + "/predictor/"
+            candidates.append({
+                "pipeline": pipeline_name, "model": model, "metric": metric_name,
+                "score": metrics[metric_name], "predictor_prefix": predictor_prefix,
+            })
     if not candidates:
         raise RuntimeError(f"No AutoML metrics artifacts found for run {run_id!r}")
     # Pipeline score artifacts use AutoGluon's higher-is-better convention, including negated losses.
@@ -508,10 +500,7 @@ def serving_runtime_exists(client, settings: dict[str, object], name: str) -> bo
 
 
 def create_serving_runtime_from_template(client, settings: dict[str, object], runtime_name: str) -> bool:
-    """Clone the OpenShift AI AutoGluon runtime template into the demo project."""
-    if serving_runtime_exists(client, settings, runtime_name):
-        print(f"Reusing existing ServingRuntime {runtime_name}.")
-        return False
+    """Clone/reconcile the OpenShift AI AutoGluon runtime template in the demo project."""
     template_name = settings["serving_runtime_template"]
     template_namespace = settings["serving_runtime_template_namespace"]
     try:
@@ -530,17 +519,48 @@ def create_serving_runtime_from_template(client, settings: dict[str, object], ru
     if embedded is None:
         raise RuntimeError(f"OpenShift Template {template_name!r} contains no ServingRuntime object")
     allowed_annotations = {
-        "opendatahub.io/apiProtocol", "opendatahub.io/runtime-version", "openshift.io/display-name",
+        "opendatahub.io/apiProtocol", "opendatahub.io/runtime-version", "opendatahub.io/template-name",
+        "opendatahub.io/template-display-name", "openshift.io/display-name",
         "monitoring.opendatahub.io/scrape", "opendatahub.io/kserve-runtime",
         "prometheus.io/path", "prometheus.io/port",
     }
+    annotations = {
+        key: value
+        for key, value in (embedded.get("metadata", {}).get("annotations", {}) or {}).items()
+        if key in allowed_annotations
+    }
+    annotations.setdefault("opendatahub.io/template-name", template_name)
+    annotations.setdefault(
+        "opendatahub.io/template-display-name",
+        annotations.get("openshift.io/display-name", template_name),
+    )
+    if serving_runtime_exists(client, settings, runtime_name):
+        existing = client.get_namespaced_custom_object(
+            group="serving.kserve.io", version="v1alpha1", namespace=settings["project"],
+            plural="servingruntimes", name=runtime_name, _request_timeout=30,
+        )
+        current_annotations = (existing.get("metadata", {}).get("annotations", {}) or {})
+        missing_annotations = {
+            key: value for key, value in annotations.items()
+            if current_annotations.get(key) != value
+        }
+        if missing_annotations:
+            client.patch_namespaced_custom_object(
+                group="serving.kserve.io", version="v1alpha1", namespace=settings["project"],
+                plural="servingruntimes", name=runtime_name,
+                body={"metadata": {"annotations": missing_annotations}}, _request_timeout=30,
+            )
+            print(f"Updated dashboard template metadata on ServingRuntime {runtime_name}.")
+        else:
+            print(f"Reusing existing ServingRuntime {runtime_name}.")
+        return False
     runtime = {
         "apiVersion": "serving.kserve.io/v1alpha1",
         "kind": "ServingRuntime",
         "metadata": {
             "name": runtime_name,
             "namespace": settings["project"],
-            "annotations": {key: value for key, value in (embedded.get("metadata", {}).get("annotations", {}) or {}).items() if key in allowed_annotations},
+            "annotations": annotations,
             "labels": {"opendatahub.io/dashboard": "true"},
         },
         "spec": embedded.get("spec"),
