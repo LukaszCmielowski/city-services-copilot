@@ -5,8 +5,8 @@ Optionally add app-config.json to call deployed scoring and AutoRAG endpoints.
 """
 from __future__ import annotations
 
-import csv, html, json, math, re, ssl
-from datetime import date, datetime, timedelta
+import csv, html, json, math, re, ssl, sys
+from datetime import datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +15,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from service_catalog import SERVICES, DEFAULT_SERVICE, SAMPLE_REQUESTS, PRIORITY_RISK, CHANNEL_RISK, NEIGHBORHOOD_RISK, sla_days_for
+
 CONFIG_PATH = ROOT / "app-config.json"
 PUBLIC_STATIC_PATHS = {"/app.js", "/styles.css", "/docs/assets/sample-ui.png"}
 
@@ -35,19 +39,23 @@ def load_config():
         raise RuntimeError("app-config.json requires api_token and endpoints")
     if "endpoint_tokens" in config and not isinstance(config["endpoint_tokens"], dict):
         raise RuntimeError("app-config.json endpoint_tokens must be an object")
-    for key in ("endpoint_tls_verify", "endpoint_ca_bundles"):
+    for key in ("endpoint_tls_verify", "endpoint_ca_bundles", "endpoint_tls_strict"):
         if key in config and not isinstance(config[key], dict):
             raise RuntimeError(f"app-config.json {key} must be an object")
     if "tabular_feature_importance" in config and not isinstance(config["tabular_feature_importance"], dict):
         raise RuntimeError("app-config.json tabular_feature_importance must be an object")
+    if config.get("responses_auth_header", "Authorization") not in {"Authorization", "X-Api-Key"}:
+        raise RuntimeError("responses_auth_header must be Authorization or X-Api-Key")
+    if config.get("responses_protocol", "responses") != "responses" or config.get("endpoint_protocol", "kserve-v1") != "kserve-v1":
+        raise RuntimeError("Use KServe scoring and the deployed starter-kit Responses API")
     return config
 
 
 APP_CONFIG = load_config()
 
 
-def call_endpoint(name, payload):
-    """Forward JSON to a configured endpoint without exposing its token to the UI."""
+def open_endpoint(name, payload, timeout=30):
+    """Open a configured endpoint without exposing its token to the UI."""
     endpoint = APP_CONFIG.get("endpoints", {}).get(name)
     if not endpoint:
         return None
@@ -55,8 +63,9 @@ def call_endpoint(name, payload):
     if not isinstance(token, str) or not token:
         raise EndpointError(f"{name} endpoint has no API token")
     body = json.dumps(payload).encode("utf-8")
+    auth_header = APP_CONFIG.get("responses_auth_header", "Authorization") if name == "responses" else "Authorization"
     request = Request(endpoint, data=body, method="POST", headers={
-        "Authorization": f"Bearer {token}",
+        auth_header: token if auth_header == "X-Api-Key" else f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     })
@@ -64,8 +73,9 @@ def call_endpoint(name, payload):
         verify_tls = APP_CONFIG.get("endpoint_tls_verify", {}).get(name, True)
         ca_bundle = APP_CONFIG.get("endpoint_ca_bundles", {}).get(name)
         context = ssl.create_default_context(cafile=ca_bundle) if verify_tls else ssl._create_unverified_context()
-        with urlopen(request, context=context, timeout=30) as response:
-            return json.loads(response.read())
+        if APP_CONFIG.get("endpoint_tls_strict", {}).get(name, True) is False:
+            context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        return urlopen(request, context=context, timeout=timeout)
     except HTTPError as error:
         raise EndpointError(f"{name} endpoint returned HTTP {error.code}") from error
     except URLError as error:
@@ -78,12 +88,20 @@ def call_endpoint(name, payload):
         raise EndpointError(f"{name} endpoint is unreachable: {reason}") from error
     except TimeoutError as error:
         raise EndpointError(f"{name} endpoint timed out") from error
+
+
+def call_endpoint(name, payload, timeout=30):
+    """Forward JSON to a configured endpoint and return the parsed body."""
+    response = open_endpoint(name, payload, timeout=timeout)
+    if response is None:
+        return None
+    try:
+        with response:
+            return json.loads(response.read())
     except json.JSONDecodeError as error:
         raise EndpointError(f"{name} endpoint returned invalid JSON") from error
-
-
-def uses_kserve_v1(name):
-    return APP_CONFIG.get("endpoint_protocol") == "kserve-v1" and bool(APP_CONFIG.get("endpoints", {}).get(name))
+    except (TimeoutError, URLError) as error:
+        raise EndpointError(f"{name} endpoint response could not be read") from error
 
 
 def responses_result(response):
@@ -104,14 +122,8 @@ def responses_result(response):
                     })
     if not answer:
         raise EndpointError("responses endpoint returned no output text")
-    return {"answer": answer, "sources": sources}
-
-
-SERVICE_BASELINES = {
-    "Illegal dumping": (4.2, .31, 52), "Pothole": (3.5, .22, 68),
-    "Missed trash collection": (2.1, .15, 45), "Streetlight outage": (6.8, .38, 31),
-    "Graffiti": (5.1, .28, 27),
-}
+    grounding = "citations" if sources else "none"
+    return {"answer": answer, "sources": sources, "grounding": grounding}
 
 
 def load_forecast_history():
@@ -125,31 +137,74 @@ FORECAST_HISTORY = load_forecast_history()
 
 def kserve_tabular_payload(p):
     service = p.get("service", "Illegal dumping")
-    days = SERVICE_BASELINES.get(service, SERVICE_BASELINES["Illegal dumping"])[0]
     row = {
         "service_type": service,
         "neighborhood": p.get("neighborhood", "Kensington"),
         "intake_channel": p.get("channel", "Mobile app"),
         "priority": p.get("priority", "Standard"),
         "opened_at": datetime.now().strftime("%Y-%m-%dT%H:%M"),
-        "sla_days": round(days),
+        "sla_days": sla_days_for(service),
     }
     # The AutoGluon KServe v1 server consumes one list-wrapped value per field
     # in each instance; scalar values cannot be converted into a DataFrame.
     return {"instances": [{key: [value] for key, value in row.items()}]}
 
 
-def first_prediction(response):
+def probability_value(value, *, explicit=False):
+    """Validate a probability; bare 0/1 predictions remain class labels."""
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(value) and (0 <= value <= 1 if explicit else 0 < value < 1):
+        return value
+    return None
+
+
+def prediction_parts(response):
+    """Separate a KServe class label from a probability when one is present."""
     prediction = response.get("predictions") if isinstance(response, dict) else None
-    if isinstance(prediction, list) and prediction:
+    while isinstance(prediction, list):
+        if len(prediction) != 1:
+            raise EndpointError("KServe endpoint returned an unsupported prediction")
         prediction = prediction[0]
-    if isinstance(prediction, list) and prediction:
-        prediction = prediction[0]
-    if isinstance(prediction, dict):
-        prediction = prediction.get("prediction", prediction.get("label", prediction.get("value")))
     if prediction is None:
         raise EndpointError("KServe endpoint returned no predictions")
-    return prediction
+    probability = None
+    if isinstance(prediction, dict):
+        # AutoGluon v1 predict_proba returns one dictionary per request,
+        # keyed by the original target labels: 0=within SLA, 1=SLA miss.
+        if set(prediction) == {"0", "1"}:
+            within = probability_value(prediction["0"], explicit=True)
+            probability = probability_value(prediction["1"], explicit=True)
+            if within is None or probability is None or not math.isclose(within + probability, 1, abs_tol=1e-6):
+                raise EndpointError("KServe endpoint returned invalid SLA class probabilities")
+            return probability >= 0.5, probability
+        label = next((prediction[key] for key in ("prediction", "label", "class", "value") if prediction.get(key) is not None), None)
+        for key in ("probability", "proba"):
+            if key in prediction:
+                probability = probability_value(prediction[key], explicit=True)
+                if probability is not None:
+                    break
+        if label is None and probability is None:
+            raise EndpointError("KServe endpoint returned no predictions")
+        if label is None:
+            label = probability >= 0.5
+        return label, probability
+    probability = probability_value(prediction)
+    if probability is not None:
+        return probability >= 0.5, probability
+    return prediction, None
+
+
+def positive_class(label):
+    if isinstance(label, bool):
+        return label
+    if isinstance(label, (int, float)) and not isinstance(label, bool) and float(label) == 1.0:
+        return True
+    return str(label).strip().lower() in {"1", "true", "yes"}
 
 
 def global_feature_importance():
@@ -176,27 +231,42 @@ def global_feature_importance():
     return drivers[:6]
 
 
-def kserve_tabular_result(response, p):
-    prediction = first_prediction(response)
-    positive = prediction is True or prediction == 1 or str(prediction).strip().lower() in {"1", "true", "yes"}
-    base_days = SERVICE_BASELINES.get(p.get("service"), SERVICE_BASELINES["Illegal dumping"])[0]
-    risk = 74 if positive else 22
-    return {
-        "risk": risk,
-        "days": round(base_days * (1.35 if positive else .8), 1),
-        "band": "At risk of SLA miss" if positive else "Likely within SLA",
+def kserve_tabular_result(response):
+    label, probability = prediction_parts(response)
+    positive = positive_class(label)
+    result = {
+        "mode": "model",
+        "outcome": "sla_miss" if positive else "within_sla",
         "drivers": global_feature_importance(),
     }
+    if probability is not None:
+        result["risk"] = round(probability * 100)
+    return result
 
 
-def kserve_timeseries_payload(p):
+def series_rows(p):
     service = p.get("service", "Illegal dumping")
     neighborhood = p.get("neighborhood", "Kensington")
     item_id = f"{service.lower().replace(' ', '-')}__{neighborhood.lower().replace(' ', '-')}"
     rows = [row for row in FORECAST_HISTORY if row["item_id"] == item_id][-35:]
     if not rows:
         raise EndpointError(f"No bundled forecast history is available for {service} in {neighborhood}")
-    return {"instances": [{key: (float(value) if key == "target" else value) for key, value in row.items()} for row in rows]}
+    return rows
+
+
+def history_instances(rows):
+    return {"instances": [
+        {key: (float(value) if key == "target" else value) for key, value in row.items()}
+        for row in rows
+    ]}
+
+
+def kserve_timeseries_payload(p):
+    return history_instances(series_rows(p))
+
+
+def forecast_result(values, source):
+    return {"points": [{"value": value} for value in values], "total": sum(values), "source": source}
 
 
 def kserve_forecast_result(response):
@@ -218,9 +288,8 @@ def kserve_forecast_result(response):
             raise EndpointError("KServe time-series endpoint returned an unsupported prediction") from error
     if len(parsed) < 7:
         raise EndpointError("KServe time-series endpoint returned fewer than seven forecast points")
-    start = date.today() + timedelta(days=1)
-    points = [{"label": (start + timedelta(days=index)).strftime("%a"), "value": value} for index, value in enumerate(parsed[:7])]
-    return {"points": points, "total": sum(parsed[:7]), "baseline": round(sum(parsed[:7]) / 7)}
+    return forecast_result(parsed[:7], "model")
+
 
 def load_guidance():
     """Load the same bundled Markdown corpus that the AutoRAG setup uploads."""
@@ -232,6 +301,7 @@ def load_guidance():
         text = re.sub(r"^#\s+.+$|^Source:\s*https?://\S+$", "", content, flags=re.MULTILINE).strip()
         documents.append({
             "title": title_match.group(1) if title_match else path.stem.replace("-", " ").title(),
+            "file": path.name,
             "agency": "City of Philadelphia",
             "url": source_match.group(1) if source_match else "https://www.phila.gov/311/",
             "text": text,
@@ -240,35 +310,140 @@ def load_guidance():
 
 GUIDANCE = load_guidance()
 
-def predict_request(p):
-    payload = kserve_tabular_payload(p) if uses_kserve_v1("tabular_scoring") else p
-    live = call_endpoint("tabular_scoring", payload)
-    if live is not None:
-        return kserve_tabular_result(live, p) if uses_kserve_v1("tabular_scoring") else live
+
+def guidance_object(result, label):
+    """Parse the structured answer requested from the agent."""
+    try:
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", result["answer"].strip())
+        content = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise EndpointError(f"AutoRAG returned an invalid {label}; try again") from error
+    if not isinstance(content, dict):
+        raise EndpointError(f"AutoRAG returned an invalid {label}; try again")
+    return content
+
+
+def guidance_sources(result, urls):
+    """Preserve citations and admit generated references only from the bundled corpus."""
+    sources = list(result["sources"])
+    known = {doc["url"]: doc for doc in GUIDANCE}
+    if isinstance(urls, list):
+        for url in urls:
+            if isinstance(url, str) and url in known and not any(source.get("url") == url for source in sources):
+                doc = known[url]
+                sources.append({"url": url, "title": doc["title"], "agency": "City of Philadelphia"})
+    grounding = result["grounding"]
+    if grounding == "none" and sources:
+        grounding = "references"
+    return {"sources": sources, "grounding": grounding}
+
+
+def operator_brief(p):
+    """Ask AutoRAG for policy guidance; model estimates stay outside the draft."""
     service = p.get("service", "Illegal dumping")
-    days, base_risk, _ = SERVICE_BASELINES.get(service, SERVICE_BASELINES["Illegal dumping"])
-    risk = base_risk + {"Phone":.04,"Web":.01,"Mobile app":-.02}.get(p.get("channel"), 0) + {"High":.16,"Standard":0,"Low":-.08}.get(p.get("priority"),0) + {"Kensington":.06,"Center City":-.03,"West Philadelphia":.02,"South Philadelphia":0}.get(p.get("neighborhood"),0)
-    risk=max(.04,min(.86,risk)); resolution=max(1, days*(.83+risk*.58))
-    return {"risk":round(risk*100),"days":round(resolution,1),"band":"Likely within SLA" if risk<.35 else "Needs attention" if risk<.55 else "At risk of SLA miss","drivers":[]}
+    if service not in SERVICES:
+        raise ValueError("Choose a supported service for the handling brief")
+    context = guidance_input({**p, "question": ""})
+    prompt = (
+        f"{context} Intake channel: {p.get('channel', 'Mobile app')}. "
+        f"Operator-assigned priority: {p.get('priority', 'Standard')}. "
+        "Retrieve the relevant city service guidance. Return only one JSON object with "
+        '"handling_steps": an array of 2 to 4 concise operator instructions, '
+        '"resident_reply": a short resident-facing response draft, and '
+        '"source_urls": an array of the exact Source URLs from the retrieved documents. '
+        "Use only retrieved evidence for routing, information to collect, and safety advice. "
+        "If the evidence is insufficient, say what requires verification. "
+        "Do not invent a department, completed action, request number, appointment, or completion promise. "
+        "This is an incoming report, so do not claim it has already been submitted or assigned. "
+        "Do not invent numerical risk, forecasts, or resolution times. "
+        "Do not treat a predicted SLA miss or assigned priority as an emergency. "
+        "Return source_urls as [] if the retrieved evidence has no Source URL."
+    )
+    result = call_guidance(prompt)
+    if result is None:
+        document = next((doc for doc in GUIDANCE if doc["file"] == SERVICES[service]["guidance_file"]), None)
+        if document is None:
+            raise EndpointError("Bundled service guidance is unavailable")
+        return {
+            "handling_steps": [document["text"]],
+            "resident_reply": f"Thank you for reporting {service.lower()}. Please provide a precise location and the details requested in the service guidance, with photos only when safe. You can follow a submitted request through 311. Completion timing depends on review and site conditions.",
+            "sources": [document], "grounding": "sample",
+        }
+    brief = guidance_object(result, "handling brief")
+    steps, reply = brief.get("handling_steps"), brief.get("resident_reply")
+    if (not isinstance(steps, list) or not 1 <= len(steps) <= 6
+            or not all(isinstance(step, str) and step.strip() for step in steps)
+            or not isinstance(reply, str) or not reply.strip()):
+        raise EndpointError("AutoRAG returned an incomplete handling brief")
+    return {"handling_steps": steps, "resident_reply": reply,
+            **guidance_sources(result, brief.get("source_urls", []))}
+
+
+def predict_request(p):
+    live = call_endpoint("tabular_scoring", kserve_tabular_payload(p))
+    service = SERVICES.get(p.get("service"), SERVICES[DEFAULT_SERVICE])
+    if live is not None:
+        return {**kserve_tabular_result(live), "sla_days": service["sla_days"]}
+    risk = service["base_risk"] + PRIORITY_RISK.get(p.get("priority"), 0) + CHANNEL_RISK.get(p.get("channel"), 0) + NEIGHBORHOOD_RISK.get(p.get("neighborhood"), 0)
+    risk = max(.04, min(.86, risk))
+    return {"mode": "sample", "risk": round(risk*100), "sla_days": service["sla_days"],
+            "outcome": "sla_miss" if risk >= .5 else "within_sla", "drivers": []}
+
 
 def forecast_volume(p):
-    payload = kserve_timeseries_payload(p) if uses_kserve_v1("timeseries_scoring") else p
-    live = call_endpoint("timeseries_scoring", payload)
+    live = call_endpoint("timeseries_scoring", kserve_timeseries_payload(p))
     if live is not None:
-        return kserve_forecast_result(live) if uses_kserve_v1("timeseries_scoring") else live
-    _, _, base = SERVICE_BASELINES.get(p.get("service"), SERVICE_BASELINES["Illegal dumping"]); start=date.today()+timedelta(days=1); points=[]
-    for i in range(7):
-        d=start+timedelta(days=i); val=round(max(12,base+7*math.sin((i+1)*1.4)+(-13 if d.weekday()>4 else 0)+i*.8)); points.append({"label":d.strftime("%a"),"value":val})
-    return {"points":points,"total":sum(x["value"] for x in points),"baseline":base}
+        return kserve_forecast_result(live)
+    base = SERVICES.get(p.get("service"), SERVICES[DEFAULT_SERVICE])["daily_volume"]
+    values = [round(max(0, base + 7*math.sin((i+1)*1.4) + (-13 if i in (4, 5) else 0) + i*.8)) for i in range(7)]
+    return forecast_result(values, "sample")
+
+
+def guidance_input(p):
+    """Attach the selected request so the answer is about the case on screen."""
+    question = (p.get("question") or "").strip()
+    service = (p.get("service") or "").strip()
+    neighborhood = (p.get("neighborhood") or "").strip()
+    if not (service and neighborhood):
+        return question
+    context = f"Service request: {service} in {neighborhood}."
+    return f"{context} {question}".strip() if question else context
 
 def retrieve_guidance(p):
-    live = call_endpoint("responses", {"input": p.get("question", "")})
+    question = guidance_input(p)
+    prompt = (
+        f"{question}\n\n"
+        "Retrieve the relevant city service guidance and answer the question using only retrieved evidence. "
+        "Return only one JSON object with "
+        '\"answer\": a concise answer to the question, and '
+        '\"source_urls\": an array of the exact Source URLs from the retrieved documents used for the answer. '
+        "Do not invent references or service commitments. If the evidence is insufficient, say what requires verification. "
+        "Return source_urls as [] if the retrieved evidence has no Source URL."
+    )
+    live = call_guidance(prompt)
     if live is not None:
-        return responses_result(live)
-    question=p.get("question","").lower(); tokens=set(re.findall(r"[a-z]{3,}",question))
+        content = guidance_object(live, "policy answer")
+        answer = content.get("answer")
+        if not isinstance(answer, str) or not answer.strip():
+            raise EndpointError("AutoRAG returned an incomplete policy answer; try again")
+        return {"answer": answer.strip(), **guidance_sources(live, content.get("source_urls", []))}
+    tokens=set(re.findall(r"[a-z]{3,}",question.lower()))
     sources=sorted(GUIDANCE,key=lambda x:len(tokens & set(re.findall(r"[a-z]{3,}",(x["title"]+" "+x["text"]).lower()))),reverse=True)[:2]
-    answer=("For an illegal-dumping report, confirm the closest address, a clear description, and safe-to-share photos. Route the request for inspection, cleanup, or enforcement based on field findings, and advise the resident to track its status through 311. Escalate an immediate hazard to 911." if any(x in question for x in ("dump","trash","illegal")) else "Confirm the location and description, route the request to the responsible city team, and give the resident the 311 status-tracking guidance. Escalate an immediate hazard to 911.")
-    return {"answer":answer,"sources":sources}
+    service = (p.get("service") or "").strip()
+    neighborhood = (p.get("neighborhood") or "").strip()
+    subject = f"{service} request in {neighborhood}" if service and neighborhood else "request"
+    focus = service.lower() if service else question.lower()
+    if any(x in focus for x in ("dump","trash","illegal")):
+        answer = f"For this {subject}, confirm the closest address, a clear description, and safe-to-share photos. Route the request for inspection, cleanup, or enforcement based on field findings, and advise the resident to track its status through 311. Escalate an immediate hazard to 911."
+    else:
+        answer = f"For this {subject}, confirm the location and description, route the request to the responsible city team, and give the resident the 311 status-tracking guidance. Escalate an immediate hazard to 911."
+    return {"answer":answer,"sources":sources,"grounding":"sample"}
+
+
+def call_guidance(question):
+    """Both guidance routes use the deployed agent's non-streaming Responses API."""
+    live = call_endpoint("responses", {"input": question, "stream": False}, timeout=180)
+    return responses_result(live) if live is not None else None
 
 
 def markdown_inline(text):
@@ -361,13 +536,33 @@ body{{margin:0;background:#f2f5ef;color:#14221e;font:16px/1.65 system-ui,sans-se
 </style></head><body><main><a class="back" href="/">← Back to the demo</a>{guide}</main></body></html>"""
 
 
+def demo_mode_label():
+    """One chip for the room: sample results, or whichever live path is configured."""
+    endpoints = APP_CONFIG.get("endpoints") or {}
+    if not isinstance(endpoints, dict):
+        endpoints = {}
+    scoring = bool(endpoints.get("tabular_scoring") or endpoints.get("timeseries_scoring"))
+    guidance = bool(endpoints.get("responses"))
+    if scoring and guidance:
+        return "Live models"
+    if scoring:
+        return "Live scoring"
+    if guidance:
+        return "Live guidance"
+    return "Sample results"
+
+
 def demo_page_html():
     """Read the checked-in, operator-facing home page without browser caching."""
-    return (ROOT / "index.html").read_text(encoding="utf-8")
+    page = (ROOT / "index.html").read_text(encoding="utf-8")
+    return page.replace("__MODE_LABEL__", demo_mode_label()).replace("__SAMPLE_REQUESTS__", json.dumps(SAMPLE_REQUESTS).replace("<", "\\u003c"))
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**k): super().__init__(*a,directory=str(ROOT),**k)
     def log_message(self,*a): return
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
     def send_json(self, status, payload):
         body = json.dumps(payload).encode()
         try:
@@ -401,7 +596,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             p=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or b"{}")
             route=urlparse(self.path).path
-            result={"/api/predict":predict_request,"/api/forecast":forecast_volume,"/api/ask":retrieve_guidance}.get(route)
+            result={"/api/predict":predict_request,"/api/forecast":forecast_volume,"/api/ask":retrieve_guidance,"/api/brief":operator_brief}.get(route)
             if not result: self.send_error(HTTPStatus.NOT_FOUND); return
             self.send_json(HTTPStatus.OK, result(p))
         except EndpointError as e: self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
@@ -416,4 +611,6 @@ if __name__ == "__main__":
         print("Using bundled sample scoring results.")
     if not APP_CONFIG.get("endpoints", {}).get("responses"):
         print("Guidance answers are using the bundled sample corpus (AutoRAG endpoint not configured).")
+    else:
+        print("Live AutoRAG guidance enabled")
     ThreadingHTTPServer(("127.0.0.1",8000),Handler).serve_forever()

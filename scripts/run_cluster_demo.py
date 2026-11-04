@@ -4,8 +4,8 @@
 Copy .env.example to .env, fill in the connection and secret names, then run:
     python3 scripts/run_cluster_demo.py
 
-The script follows the managed-pipeline/KFP flow used by AutoX CI. It never
-downloads external data and never creates or changes Kubernetes secrets.
+The script follows the managed-pipeline/KFP flow used by AutoX CI. AutoRAG
+deployment downloads the generated kit and creates its serving resources.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import argparse
 import signal
 import json
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -120,6 +121,7 @@ def config() -> dict[str, object]:
         "verify_ssl": bool_env("KFP_VERIFY_SSL"),
         "openshift_verify_ssl": bool_env("RHOAI_OPENSHIFT_API_VERIFY_SSL"),
         "openshift_timeout": positive_int_env("RHOAI_OPENSHIFT_API_TIMEOUT_SECONDS", 20),
+        "openshift_ca_bundle": optional_env("RHOAI_OPENSHIFT_API_CA_BUNDLE"),
         "route_prefix": env("RHOAI_DSPA_ROUTE_PREFIX", required=False, default="ds-pipeline"),
         "s3_endpoint": env("AWS_S3_ENDPOINT"),
         "s3_access_key": env("AWS_ACCESS_KEY_ID"),
@@ -149,6 +151,7 @@ def config() -> dict[str, object]:
         "app_config_path": app_config_path,
         "app_endpoint_verify_ssl": bool_env("APP_ENDPOINT_VERIFY_SSL", True),
         "app_endpoint_ca_bundle": optional_env("APP_ENDPOINT_CA_BUNDLE"),
+        "automl_work_dir": ROOT / "run-results" / "automl",
         "embedding_models": env_list("AUTORAG_EMBEDDING_MODELS"),
         "generation_models": env_list("AUTORAG_GENERATION_MODELS"),
         "tabular_pipeline": env("RHOAI_MANAGED_PIPELINE_TABULAR", required=False, default="autogluon-tabular-training-pipeline"),
@@ -158,6 +161,15 @@ def config() -> dict[str, object]:
         "autorag_preset": env("AUTORAG_PRESET", required=False, default="speed"),
         "autorag_metric": env("AUTORAG_OPTIMIZATION_METRIC", required=False, default="unitxt:faithfulness"),
         "autorag_patterns": int(env("AUTORAG_MAX_RAG_PATTERNS", required=False, default="5")),
+        "autorag_starter_kit_key": optional_env("AUTORAG_STARTER_KIT_S3_KEY"),
+        "autorag_deploy_maas_secret": optional_env("AUTORAG_DEPLOY_MAAS_SECRET_NAME"),
+        "autorag_deploy_db_secret": optional_env("AUTORAG_DEPLOY_DB_SECRET_NAME"),
+        "autorag_build_pull_secret": optional_env("AUTORAG_BUILD_PULL_SECRET_NAME"),
+        "autorag_work_dir": ROOT / "run-results" / "autorag",
+        "autorag_sandbox_name": env("AUTORAG_SANDBOX_NAME", required=False, default="city-services-rag"),
+        "autorag_deploy_timeout": positive_int_env("AUTORAG_DEPLOY_TIMEOUT_SECONDS", 1800),
+        "autorag_health_timeout": positive_int_env("AUTORAG_HEALTH_TIMEOUT_SECONDS", 300),
+        "autorag_smoke_question": env("AUTORAG_SMOKE_QUESTION", required=False, default="How should an operator route an illegal-dumping report?"),
     }
 
 
@@ -218,6 +230,8 @@ def discover_kfp_url(settings: dict[str, object]) -> str:
     kube_config = client.Configuration()
     kube_config.host = settings["rhoai_url"]
     kube_config.verify_ssl = settings["openshift_verify_ssl"]
+    if settings.get("openshift_ca_bundle"):
+        kube_config.ssl_ca_cert = str(Path(settings["openshift_ca_bundle"]).resolve())
     kube_config.api_key["authorization"] = settings["token"]
     kube_config.api_key_prefix["authorization"] = "Bearer"
     timeout = settings["openshift_timeout"]
@@ -479,6 +493,8 @@ def kserve_client(settings: dict[str, object]):
     kube_config = client.Configuration()
     kube_config.host = settings["rhoai_url"]
     kube_config.verify_ssl = settings["openshift_verify_ssl"]
+    if settings.get("openshift_ca_bundle"):
+        kube_config.ssl_ca_cert = str(Path(settings["openshift_ca_bundle"]).resolve())
     kube_config.api_key["authorization"] = settings["token"]
     kube_config.api_key_prefix["authorization"] = "Bearer"
     return client.CustomObjectsApi(client.ApiClient(kube_config))
@@ -592,14 +608,17 @@ def runtime_for_deployment(client, settings: dict[str, object], endpoint_name: s
     created = create_serving_runtime_from_template(client, settings, endpoint_name)
     if created:
         print("Waiting 30s for KServe to index the new ServingRuntime...", flush=True)
-        endpoint_spinner_wait(30, endpoint_name, "initializing runtime")
+        if sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
+            endpoint_spinner_wait(30, endpoint_name, "initializing runtime")
+        else:
+            time.sleep(30)
     return endpoint_name
 
 
-def inference_service_manifest(settings: dict[str, object], name: str, predictor_prefix: str, runtime_name: str) -> dict:
+def inference_service_manifest(settings: dict[str, object], name: str, predictor_prefix: str, runtime_name: str, kind: str) -> dict:
     storage_key = settings["kserve_storage_key"]
     service_account = settings["kserve_service_account"] or f"{storage_key}-sa"
-    return {
+    manifest = {
         "apiVersion": "serving.kserve.io/v1beta1",
         "kind": "InferenceService",
         "metadata": {
@@ -628,6 +647,27 @@ def inference_service_manifest(settings: dict[str, object], name: str, predictor
             },
         }},
     }
+    if kind == "tabular":
+        manifest["spec"]["predictor"]["model"]["env"] = [{"name": "PREDICT_PROBA", "value": "true"}]
+    return manifest
+
+
+def enable_tabular_probabilities(client, settings: dict[str, object], name: str) -> None:
+    """Reconcile this classifier's output mode without changing a shared runtime."""
+    service = client.get_namespaced_custom_object(
+        group="serving.kserve.io", version="v1beta1", namespace=settings["project"],
+        plural="inferenceservices", name=name, _request_timeout=30,
+    )
+    current = service.get("spec", {}).get("predictor", {}).get("model", {}).get("env", [])
+    updated = [item for item in current if item.get("name") != "PREDICT_PROBA"]
+    updated.append({"name": "PREDICT_PROBA", "value": "true"})
+    if current != updated:
+        client.patch_namespaced_custom_object(
+            group="serving.kserve.io", version="v1beta1", namespace=settings["project"],
+            plural="inferenceservices", name=name,
+            body={"spec": {"predictor": {"model": {"env": updated}}}}, _request_timeout=30,
+        )
+        print(f"Enabled SLA-miss probabilities on {name}.")
 
 
 def wait_for_inference_service(client, settings: dict[str, object], name: str) -> dict:
@@ -645,7 +685,7 @@ def wait_for_inference_service(client, settings: dict[str, object], name: str) -
         reason = ready.get("reason", "") if ready else ""
         status = f"{state}{f': {reason}' if reason else ''}"
         if not live_wait and status != previous_status:
-            print(f"  {name}: readiness {status}")
+            print(f"  {name}: readiness {status}", flush=True)
         previous_status = status
         remaining = max(0, deadline - time.monotonic())
         if live_wait:
@@ -698,7 +738,7 @@ def update_app_config(settings: dict[str, object], endpoints: dict[str, str], ta
         raise RuntimeError(f"Cannot update {path.name}: endpoints must be a JSON object")
     current_endpoints.update(endpoints)
     config["endpoints"] = current_endpoints
-    config["endpoint_protocol"] = "kserve-v1"
+    config.pop("endpoint_protocol", None)
     endpoint_tokens = config.get("endpoint_tokens") or {}
     if not isinstance(endpoint_tokens, dict):
         raise RuntimeError(f"Cannot update {path.name}: endpoint_tokens must be a JSON object")
@@ -709,29 +749,87 @@ def update_app_config(settings: dict[str, object], endpoints: dict[str, str], ta
         raise RuntimeError(f"Cannot update {path.name}: endpoint_tls_verify must be a JSON object")
     endpoint_tls_verify.update({name: settings["app_endpoint_verify_ssl"] for name in endpoints})
     config["endpoint_tls_verify"] = endpoint_tls_verify
-    if settings["app_endpoint_ca_bundle"]:
-        endpoint_ca_bundles = config.get("endpoint_ca_bundles") or {}
-        if not isinstance(endpoint_ca_bundles, dict):
-            raise RuntimeError(f"Cannot update {path.name}: endpoint_ca_bundles must be a JSON object")
-        endpoint_ca_bundles.update({name: settings["app_endpoint_ca_bundle"] for name in endpoints})
-        config["endpoint_ca_bundles"] = endpoint_ca_bundles
+    endpoint_ca_bundles = config.get("endpoint_ca_bundles") or {}
+    if not isinstance(endpoint_ca_bundles, dict):
+        raise RuntimeError(f"Cannot update {path.name}: endpoint_ca_bundles must be a JSON object")
+    for name in endpoints:
+        if settings["app_endpoint_ca_bundle"]:
+            endpoint_ca_bundles[name] = settings["app_endpoint_ca_bundle"]
+        else:
+            endpoint_ca_bundles.pop(name, None)
+    config["endpoint_ca_bundles"] = endpoint_ca_bundles
     if not isinstance(config.get("api_token"), str) or not config["api_token"].strip() or config["api_token"].startswith("replace-with-"):
         config["api_token"] = settings["token"]
     if tabular_importance is not None:
         config["tabular_feature_importance"] = tabular_importance
-    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    from deploy_autorag import write_private_json
+    write_private_json(path, config)
     configured = ", ".join(sorted(endpoints))
     if configured:
-        print(f"  Updated {path.relative_to(ROOT)} with {configured}; it remains Git-ignored.")
+        print(f"  Updated {path} with {configured}; it remains Git-ignored.")
     elif tabular_importance is not None:
-        print(f"  Updated {path.relative_to(ROOT)} with tabular feature importance; it remains Git-ignored.")
+        print(f"  Updated {path} with tabular feature importance; it remains Git-ignored.")
     print("  Next: run `python3 main.py`, then open http://localhost:8000.")
     if not config.get("endpoints", {}).get("responses"):
         print("  AutoML scoring is live; guidance remains in bundled sample mode until AutoRAG is configured.")
 
 
+def automl_endpoint_settings(settings: dict[str, object]) -> dict[str, object]:
+    """Persist the deployment interpreter's trust roots for the standalone app."""
+    import ssl
+    import tempfile
+
+    if not settings["app_endpoint_verify_ssl"] or settings["app_endpoint_ca_bundle"]:
+        return settings
+    certificates = ssl.create_default_context().get_ca_certs(binary_form=True)
+    if not certificates:
+        raise RuntimeError("No trusted CA certificates are available; configure APP_ENDPOINT_CA_BUNDLE")
+    directory = settings["automl_work_dir"]
+    directory.mkdir(parents=True, exist_ok=True)
+    workspace = Path(tempfile.mkdtemp(prefix="deployment-", dir=directory))
+    bundle = workspace / "scoring-ca.pem"
+    with bundle.open("w") as output:
+        os.chmod(bundle, 0o600)
+        output.write("".join(ssl.DER_cert_to_PEM_cert(certificate) for certificate in certificates))
+    return dict(settings, app_endpoint_ca_bundle=str(bundle.resolve()))
+
+
+def verify_automl_endpoint(settings: dict[str, object], endpoint_name: str, endpoint: str) -> None:
+    """Exercise the same payload and response adapter as the app before saving."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("deployment_app", ROOT / "main.py")
+    app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(app)
+    app.APP_CONFIG = {
+        "api_token": settings["token"], "endpoints": {endpoint_name: endpoint},
+        "endpoint_tls_verify": {endpoint_name: settings["app_endpoint_verify_ssl"]},
+        "endpoint_ca_bundles": {endpoint_name: settings["app_endpoint_ca_bundle"] or None},
+    }
+    sample = {"service": "Illegal dumping", "neighborhood": "Kensington", "channel": "Mobile app", "priority": "Standard"}
+    try:
+        if endpoint_name == "tabular_scoring":
+            app.predict_request(sample)
+        else:
+            app.forecast_volume(sample)
+    except app.EndpointError as error:
+        raise RuntimeError(f"{endpoint_name} authenticated scoring check failed: {error}; app configuration was not changed") from error
+    print(f"  Authenticated {endpoint_name} scoring check passed.")
+
+
 def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bool, dry_run: bool) -> None:
-    from kubernetes.client.rest import ApiException
+    if not dry_run:
+        from kubernetes.client.rest import ApiException
+
+    pipeline_client = make_client(settings)
+    # Validate every run before creating serving resources.
+    for run_id in run_ids:
+        try:
+            state = run_state(pipeline_client.get_run(run_id))
+        except Exception as error:
+            raise RuntimeError(f"Could not retrieve AutoML run {run_id!r}; verify the KFP route and run ID") from error
+        if not is_success(state):
+            raise RuntimeError(f"AutoML run {run_id!r} is {state}; deployment requires a successful run")
 
     client = None if dry_run else kserve_client(settings)
     app_endpoints = {}
@@ -748,7 +846,7 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
             }
         name = f"city-services-{kind}-{run_id[:8]}"
         runtime_name = runtime_for_deployment(client, settings, name, dry_run)
-        body = inference_service_manifest(settings, name, selected["predictor_prefix"], runtime_name)
+        body = inference_service_manifest(settings, name, selected["predictor_prefix"], runtime_name, kind)
         if dry_run:
             if not settings["serving_runtime"]:
                 print(f"Would create ServingRuntime {runtime_name} from template {settings['serving_runtime_template']}.")
@@ -762,6 +860,8 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
             if error.status != 409:
                 raise RuntimeError(f"Could not create InferenceService {name!r}: HTTP {error.status}") from error
             print(f"Reusing existing InferenceService {name}.")
+            if kind == "tabular":
+                enable_tabular_probabilities(client, settings, name)
         if wait:
             service = wait_for_inference_service(client, settings, name)
             status = service.get("status") or {}
@@ -775,7 +875,10 @@ def deploy_automl_runs(settings: dict[str, object], run_ids: list[str], wait: bo
             else:
                 print(f"  {name} is not ready yet; app configuration was not updated for it.")
     if app_endpoints and not dry_run:
-        update_app_config(settings, app_endpoints, tabular_importance if "tabular_scoring" in app_endpoints else None)
+        app_settings = automl_endpoint_settings(settings)
+        for endpoint_name, endpoint in app_endpoints.items():
+            verify_automl_endpoint(app_settings, endpoint_name, endpoint)
+        update_app_config(app_settings, app_endpoints, tabular_importance if "tabular_scoring" in app_endpoints else None)
 
 
 def spinner_wait(seconds: int, states: dict[str, str]) -> None:
@@ -962,21 +1065,75 @@ def confirm(question: str, *, default: bool) -> bool:
     return default if not answer else answer in {"y", "yes"}
 
 
+def deploy_autorag_run(settings: dict[str, object], run_id: str, *, dry_run: bool, client=None) -> None:
+    from deploy_autorag import deploy_starter_kit
+
+    if not run_id.strip():
+        raise RuntimeError("--deploy-autorag requires a non-empty run ID")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", settings["autorag_sandbox_name"]):
+        raise RuntimeError("AUTORAG_SANDBOX_NAME must be a Kubernetes DNS label of at most 63 characters")
+    client = client or make_client(settings)
+    try:
+        state = run_state(client.get_run(run_id.strip()))
+    except Exception as error:
+        raise RuntimeError(f"Could not retrieve AutoRAG run {run_id!r}") from error
+    if not is_success(state):
+        raise RuntimeError(f"AutoRAG run {run_id!r} is {state}; deployment requires a successful run")
+    prefix = artifact_prefix(settings, f"{settings['autorag_pipeline']}/{run_id.strip()}/")
+    deploy_starter_kit(settings, run_id.strip(), artifact_client(settings), prefix, dry_run=dry_run)
+
+
 def post_submit_guide(client, settings: dict[str, object], submitted: dict[str, str], args) -> None:
     """Offer the normal watch and deployment handoff after a successful submission."""
     run_ids = list(submitted.values())
     status_command = "python3 scripts/run_cluster_demo.py --status " + " ".join(run_ids) + " --watch"
     interactive = sys.stdin.isatty() and not args.non_interactive
-    if not interactive:
+    auto_automl = getattr(args, "auto_deploy_automl", False)
+    auto_deploy = args.auto_deploy_autorag or auto_automl
+    if not interactive and not args.wait and not auto_deploy:
         print(f"\nRuns submitted. To monitor them later:\n  {status_command}")
         return
 
-    if args.wait or confirm("Watch the submitted runs until they finish", default=True):
+    if args.wait or auto_deploy or confirm("Watch the submitted runs until they finish", default=True):
         states = monitor_runs(client, settings, run_ids, watch=True, poll_interval=args.poll_interval)
     else:
         print(f"\nRuns are still executing. Monitor them later with:\n  {status_command}")
         return
 
+    if auto_deploy:
+        failures = []
+        if auto_automl:
+            runs = [submitted[name] for name in ("tabular", "timeseries")
+                    if name in submitted and is_success(states.get(submitted[name], "UNKNOWN"))]
+            failures.extend(f"{name} run did not succeed" for name in ("tabular", "timeseries")
+                            if name in submitted and not is_success(states.get(submitted[name], "UNKNOWN")))
+            if runs:
+                try:
+                    deploy_automl_runs(settings, runs, wait=True, dry_run=False)
+                except Exception as error:
+                    failures.append(str(error) if isinstance(error, (RuntimeError, ValueError, OSError))
+                                    else f"AutoML deployment failed ({type(error).__name__})")
+        if args.auto_deploy_autorag:
+            run_id = submitted.get("autorag")
+            if run_id and is_success(states.get(run_id, "UNKNOWN")):
+                try:
+                    deploy_autorag_run(settings, run_id, dry_run=False, client=client)
+                except Exception as error:
+                    failures.append(str(error) if isinstance(error, (RuntimeError, ValueError, OSError))
+                                    else f"AutoRAG deployment failed ({type(error).__name__})")
+            else:
+                failures.append("AutoRAG did not succeed; its starter kit was not deployed")
+        if failures:
+            raise RuntimeError("Automatic deployment incomplete: " + "; ".join(failures))
+        return
+
+    autorag_run = submitted.get("autorag")
+    if autorag_run and is_success(states.get(autorag_run, "UNKNOWN")):
+        deploy_command = f"python3 scripts/run_cluster_demo.py --deploy-autorag {autorag_run}"
+        if interactive and confirm("Build and deploy the best AutoRAG starter kit and connect guidance", default=False):
+            deploy_autorag_run(settings, autorag_run, dry_run=False, client=client)
+        else:
+            print(f"Deploy AutoRAG later with:\n  {deploy_command}")
     automl_run_ids = [
         submitted[name]
         for name in ("tabular", "timeseries")
@@ -992,7 +1149,7 @@ def post_submit_guide(client, settings: dict[str, object], submitted: dict[str, 
         run_id = submitted.get(name)
         if run_id in automl_run_ids:
             print(f"  {name:<10} {run_id}")
-    if not confirm("Would you like to automatically deploy these trained models as KServe scoring endpoints", default=False):
+    if not interactive or not confirm("Would you like to automatically deploy these trained models as KServe scoring endpoints", default=False):
         print(f"Deploy them later with:\n  {deploy_command}")
         return
     wait_for_endpoints = confirm("Wait for the scoring endpoint(s) to become ready", default=True)
@@ -1008,6 +1165,10 @@ def main() -> None:
     parser.add_argument("--status", metavar="RUN_ID", nargs="+", help="show status and completed-run leaderboard(s) for existing KFP run IDs")
     parser.add_argument("--watch", action="store_true", help="with --status, poll until all runs reach a terminal state")
     parser.add_argument("--deploy", metavar="RUN_ID", nargs="+", help="deploy the best model from completed AutoML run ID(s) as KServe InferenceServices")
+    parser.add_argument("--deploy-autorag", metavar="RUN_ID", help="download and deploy a successful run's best starter_kit.zip, test it, and configure live guidance")
+    parser.add_argument("--auto-deploy-autorag", action="store_true", help="after submission, wait for AutoRAG and deploy its starter kit without prompting")
+    parser.add_argument("--auto-deploy-automl", action="store_true", help="after submission, wait for selected AutoML runs, deploy, test, and configure scoring without prompting")
+    parser.add_argument("--auto-deploy", action="store_true", help="after submission, deploy all selected pipelines, test endpoints, and configure the app without prompting")
     parser.add_argument("--wait-deploy", action="store_true", help="with --deploy, wait for each InferenceService to become ready")
     parser.add_argument("--poll-interval", type=int, default=15, help="status polling interval in seconds (default: 15)")
     parser.add_argument("--non-interactive", action="store_true", help="do not prompt to watch or deploy after submitting runs")
@@ -1017,6 +1178,15 @@ def main() -> None:
     try:
         if args.poll_interval <= 0:
             raise RuntimeError("--poll-interval must be a positive integer")
+        if args.status and (args.deploy or args.deploy_autorag):
+            raise RuntimeError("--status cannot be combined with deployment")
+        if args.auto_deploy:
+            args.auto_deploy_autorag |= args.only in {"all", "autorag"}
+            args.auto_deploy_automl |= args.only in {"all", "tabular", "timeseries"}
+        if args.auto_deploy_automl and (args.only == "autorag" or args.deploy or args.status or args.deploy_autorag):
+            raise RuntimeError("--auto-deploy-automl requires submitting --only all, tabular, or timeseries")
+        if args.auto_deploy_autorag and (args.only not in {"all", "autorag"} or args.deploy or args.status or args.deploy_autorag):
+            raise RuntimeError("--auto-deploy-autorag requires submitting --only all or --only autorag")
         load_env(args.env_file)
         settings = config()
         if args.deploy:
@@ -1026,6 +1196,9 @@ def main() -> None:
                     "--deploy received an empty run ID. When spanning lines, place each backslash as the final character on its line."
                 )
             deploy_automl_runs(settings, run_ids, args.wait_deploy, args.dry_run)
+        if args.deploy_autorag:
+            deploy_autorag_run(settings, args.deploy_autorag, dry_run=args.dry_run)
+        if args.deploy or args.deploy_autorag:
             return
         if args.status:
             monitor_runs(make_client(settings), settings, args.status, args.watch, args.poll_interval)
@@ -1036,6 +1209,10 @@ def main() -> None:
             upload_data(settings, args.dry_run)
         if args.dry_run:
             submit(None, settings, selected, True, args.show_parameters)
+            if args.auto_deploy_autorag:
+                print("After AutoRAG succeeds: download its best starter kit, configure connections, build/push on OpenShift, deploy, test, and save guidance credentials.")
+            if args.auto_deploy_automl:
+                print("After AutoML succeeds: select the best predictors, deploy KServe endpoints, wait, test authenticated scoring, and save app configuration.")
         else:
             client = make_client(settings)
             submitted = submit(client, settings, selected, False)

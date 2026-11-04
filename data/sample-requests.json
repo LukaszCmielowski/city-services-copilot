@@ -1,0 +1,7 @@
+[
+  {"id":"DEMO-101","service":"Illegal dumping","neighborhood":"Kensington","channel":"Mobile app","priority":"Standard"},
+  {"id":"DEMO-102","service":"Pothole","neighborhood":"Center City","channel":"Phone","priority":"High"},
+  {"id":"DEMO-103","service":"Missed trash collection","neighborhood":"South Philadelphia","channel":"Web","priority":"Low"},
+  {"id":"DEMO-104","service":"Streetlight outage","neighborhood":"West Philadelphia","channel":"Phone","priority":"High"},
+  {"id":"DEMO-105","service":"Graffiti","neighborhood":"Center City","channel":"Mobile app","priority":"Standard"}
+]
