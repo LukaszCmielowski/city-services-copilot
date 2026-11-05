@@ -22,6 +22,8 @@ upstream templates. Local adjustments include:
   Quay fallback; gateway registration uses the mounted local mTLS state.
 - The README describes the prepared runtime, prerequisites, verified TLS,
   namespace ownership, token lifetime, and current Agent Ops metadata gap.
+- The unimplemented `run-cli` placeholder target is omitted; local agent
+  development uses the working `run-app` target.
 
 Updating this README does not modify the upstream generator or any previously
 downloaded deployment workspace. New deployments receive the bundled files.

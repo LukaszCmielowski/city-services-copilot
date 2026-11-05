@@ -113,12 +113,6 @@ function clearForecast(message) {
   $('#labels').replaceChildren();
 }
 
-function clearScoring(message = 'Scoring unavailable. Previous results were cleared.') {
-  clearRisk(message);
-  clearForecast('Requests for the same service and neighborhood.');
-  $('#decision-summary').textContent = 'Select a report to see the suggested review.';
-}
-
 let guidanceAbort = null;
 
 function resetGuidance() {
@@ -268,7 +262,7 @@ async function refresh(cachedPrediction = null) {
   const version = ++analysisVersion;
   lastAnalysis = null;
   resetGuidance();
-  clearScoring('Estimating this request’s chance of missing its target…');
+  clearRisk('Estimating this request’s chance of missing its target…');
   clearForecast('Forecasting matching demand…');
   lastAnalysis = { request, prediction: null, forecast: null };
   $('#brief-status').textContent = 'Preparing this request’s outlook…';

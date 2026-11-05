@@ -32,7 +32,7 @@ The repository already contains safe, synthetic fixture CSVs, a twenty-two-docum
 
 After the [platform prerequisites](#1-prerequisites) and [AutoRAG deployment prerequisites](#deploy-and-connect-the-best-autorag-starter-kit) are ready:
 
-1. Create their private environment file and install the runner dependencies:
+1. Create your private environment file and install the runner dependencies:
 
    ```bash
    cp .env.example .env
@@ -56,28 +56,17 @@ The repository contains deterministic synthetic fixtures with 5,000 tabular rows
 
 ### Guided setup
 
-Prefer a prompt-driven flow? Run:
+`setup_demo.py` wraps the cluster runner with a dry-run preflight and confirmation. For an interactive version of the fast path, omit `--apply`:
 
 ```bash
-python3 scripts/setup_demo.py
+python3 scripts/setup_demo.py --auto-deploy
 ```
 
-After you create `.env` from `.env.example`, the wizard runs the same dry-run preflight, shows the submission or deployment plan, and asks for confirmation before making changes. Use `--dry-run` to stop after the preview, or `--apply` to accept that plan without a prompt. `--apply` alone submits pipelines; add `--auto-deploy` to complete deployment and app configuration as well:
-
-```bash
-python3 scripts/setup_demo.py --auto-deploy --dry-run
-python3 scripts/setup_demo.py --auto-deploy --apply
-```
-
-This uploads the bundled inputs, submits and monitors all three pipelines, deploys the best tabular and time-series predictors, deploys the generated AutoRAG starter kit, tests authenticated scoring and guidance, and saves all three endpoints and their tokens to private `app-config.json`. AutoRAG requires an OpenShell gateway already installed on the cluster; the runner refreshes its mTLS certificates and registers it locally as `openshift` when needed. Local dependencies and platform prerequisites are listed below. Use `--only tabular`, `--only timeseries`, or `--only autorag` with `--auto-deploy` to complete one pipeline. `--auto-deploy-automl` and `--auto-deploy-autorag` select which results to deploy after submission.
-
-To finish existing successful runs without uploading data or retraining, use `--deploy TABULAR_RUN_ID TIMESERIES_RUN_ID`; the setup wrapper automatically waits for readiness and tests both models. Add `--deploy-autorag AUTORAG_RUN_ID` to deploy guidance in the same command. An already connected AutoRAG endpoint is preserved when deploying only AutoML.
-
-Replace every `*_RUN_ID` placeholder with an actual successful run ID from your pipeline results. Do not pass the placeholder literally.
+`--dry-run` stops after the preview; `--apply` accepts the plan without a prompt. `--auto-deploy` waits for all selected results, deploys them, tests authenticated scoring and guidance, and saves the endpoints and tokens to private `app-config.json`. Without a deployment option, setup submits pipelines only. Use `--only tabular`, `--only timeseries`, or `--only autorag` to select one pipeline. `--auto-deploy-automl` and `--auto-deploy-autorag` select which results to deploy after submission.
 
 ### Rerun without uploading data
 
-Choose whether you need a new optimization run or only deployment:
+Choose whether you need a new optimization run or only deployment. Replace each `*_RUN_ID` placeholder with an actual successful run ID from your pipeline results:
 
 | Goal | Command |
 | --- | --- |
@@ -88,14 +77,13 @@ Choose whether you need a new optimization run or only deployment:
 
 Use `--skip-upload` only when the same input objects already exist at the configured bucket and keys. Redeployment reads existing run artifacts and does not submit pipelines, upload fixtures, or re-index documents. Add `--dry-run` to preview any command. Restart the app after its configuration changes.
 
+You can combine `--deploy TABULAR_RUN_ID TIMESERIES_RUN_ID` and `--deploy-autorag AUTORAG_RUN_ID` in one setup command. Deploying only one feature preserves the other features' app configuration.
+
 ### Automated cluster run
 
-To upload the bundled fixtures and submit all three managed pipeline runs from one `.env` file, use the included cluster runner. Its KFP managed-pipeline lookup and bearer-token authentication follow the current [AutoX CI](https://github.com/red-hat-data-services/autox-ci) approach.
+For direct control, use the cluster runner with the `.env` and dependencies created in the fast path. Its KFP managed-pipeline lookup and bearer-token authentication follow the [AutoX CI](https://github.com/red-hat-data-services/autox-ci) approach. These commands preview and submit pipelines; deployment is optional:
 
 ```bash
-python3 -m pip install -r requirements-cluster.txt
-cp .env.example .env
-# Edit only the values shown in .env.example.
 python3 scripts/run_cluster_demo.py --dry-run
 python3 scripts/run_cluster_demo.py
 ```
@@ -114,7 +102,7 @@ Use the submitted run IDs to check status without resubmitting anything:
 python3 scripts/run_cluster_demo.py --status TABULAR_RUN_ID TIMESERIES_RUN_ID AUTORAG_RUN_ID --watch
 ```
 
-The monitor prints each KFP run as a compact status block, followed by a ranked leaderboard table once it succeeds. During `--watch` in an interactive terminal, it prints each run link once and then uses one in-place spinner while it waits for the next poll, rather than repeating unchanged running states. Successful states and the best row are highlighted; redirected logs stay readable and print only state changes. It also prints any AutoML HTML leaderboard location and the AutoRAG pattern-artifact location. By default, artifact lookup uses `AWS_S3_BUCKET`; set `PIPELINE_ARTIFACTS_S3_BUCKET` and, if applicable, `PIPELINE_ARTIFACTS_S3_PREFIX` when pipeline artifacts are stored elsewhere. Artifact retrieval uses the same S3 credentials in `.env`.
+The monitor shows run links, status, ranked leaderboards, and artifact locations. By default, artifact lookup uses `AWS_S3_BUCKET`; set `PIPELINE_ARTIFACTS_S3_BUCKET` and, if applicable, `PIPELINE_ARTIFACTS_S3_PREFIX` when artifacts are stored elsewhere. Retrieval uses the S3 credentials in `.env`.
 
 ### Deploy the selected AutoML models
 
@@ -127,8 +115,6 @@ python3 scripts/setup_demo.py --deploy TABULAR_RUN_ID TIMESERIES_RUN_ID --apply
 ```
 
 Add `--dry-run` to inspect the chosen model and generated `InferenceService` manifest without creating anything; it reads KFP run status and model artifacts from object storage. Each run must have succeeded before serving resources are created.
-
-With `--wait-deploy` in an interactive terminal, readiness is shown with one in-place spinner rather than repeated KServe status lines. It prints the endpoint URL once the service is ready.
 
 This is an explicit cluster write: for each endpoint, it clones the OpenShift AI `autogluon-runtime-template` into a namespace-scoped `ServingRuntime` with the same name, waits for KServe to index it, then creates the matching `InferenceService` in `RHOAI_PROJECT_NAME`. It preserves the template's dashboard metadata, so the OpenShift AI dashboard identifies it as **AutoGluon ServingRuntime for KServe** rather than an unknown runtime; re-running `--deploy` repairs that metadata on an existing demo runtime. The command reuses the one existing object-storage connection named by `S3_CONNECTION_NAME` for AutoML, AutoRAG, and KServe deployment; its default service account is `<S3_CONNECTION_NAME>-sa`. That connection must have read access to the pipeline-artifact bucket. To reuse a platform-provided runtime instead, set `AUTOML_SERVING_RUNTIME_NAME` and set `AUTOML_CREATE_SERVING_RUNTIME=false`. The AutoML deployment path does not create or alter secrets, service accounts, or Model Registry records. The tabular InferenceService sets `PREDICT_PROBA=true`, supported by the [AutoGluon runtime](https://kserve.github.io/website/docs/model-serving/predictive-inference/frameworks/autogluon); existing tabular services are reconciled on redeployment. The shared ServingRuntime and time-series service are unchanged.
 
@@ -207,21 +193,19 @@ After `--wait-deploy` completes, start the local backend:
 python3 main.py
 ```
 
-Open [http://localhost:8000](http://localhost:8000), select **Score sample requests**, then **Review** a report. Each report has four fixed facts: service, neighborhood, intake channel, and assigned priority. The backend derives `sla_days` from the shared service catalog and `opened_at` from the current submission time. KServe receives the AutoGluon training schema with list-wrapped field values.
-
-The risk card shows the estimated SLA-miss probability, predicted class at a 50% cutoff, and demo service target. Deployment enables `PREDICT_PROBA=true`; the adapter reads class `1`, including 0% and 100%. Calibration has not been assessed. Label-only model responses show the predicted class without inventing a probability. Sample mode shows illustrative risk and the same target. The demand card shows a seven-day forecast for the selected service and neighborhood using relative Day 1–Day 7 labels; live inference still uses the bundled history timestamps.
-
-No scoring calls run on page load. Queue scoring calls the tabular endpoint; selecting a report immediately displays its cached prediction and loads the matching demand forecast separately. Each card appears as soon as its result is available; guidance can start while demand is still loading. If a call fails, the successful card stays visible, **Retry outlook** is available, and service guidance remains accessible. **Model details** contains global feature importance, rather than per-request attributions. Guidance remains in sample mode until AutoRAG is deployed and connected.
+Open [http://localhost:8000](http://localhost:8000) and use the workflow below. If the backend is already running, restart it to load the updated configuration. Each feature uses sample mode until its endpoint is configured.
 
 ### Review the sample request queue
 
-Select **Score sample requests** to score five fixed demo reports using the configured tabular endpoint (or illustrative estimates in sample mode). The queue ranks requests by descending SLA-miss probability; failures and class-only responses remain unranked. Assigned priority is shown with each report: likelihood of delay is not a safety-urgency ranking. Rescoring refreshes the queue estimates. If an outlook is already selected, it remains a snapshot until the operator selects it again; the status explicitly asks for that refresh and preserves any edited draft.
+Select **Score sample requests** to score five fixed demo reports using the configured tabular endpoint (or illustrative estimates in sample mode). No scoring calls run on page load. The queue ranks requests by descending SLA-miss probability; failures and class-only responses remain unranked. Assigned priority is shown with each report: likelihood of delay is not a safety-urgency ranking. Rescoring refreshes the queue estimates while preserving the selected outlook and draft until you select the report again.
 
-The compact workspace keeps the queue beside the selected request on desktop and stacks it above the outlook on smaller screens. Select **Review** to view a report's read-only facts, risk, and matching group forecast. A short **Suggested review** identifies the next action. Class labels say **May miss target** or **Likely within target**, and identify these as predictions. The forecast total is labeled in requests and its bars expose daily counts. Group demand provides workload-planning context; it does not explain individual risk or infer staffing capacity. Global feature importance is in the collapsed **Model details** section. Selecting another report clears the previous outlook and guidance, and late responses for an earlier selection are ignored.
+Select **Review** to view the report's fixed facts, cached risk, and matching group forecast. Risk appears immediately when already scored; demand loads separately, and guidance can start while it loads. A failed call leaves successful results visible and offers **Retry outlook**. **Suggested review** identifies the next action. Group demand provides workload context; it does not explain individual risk or infer staffing capacity. **Model details** contains global feature importance. Selecting another report clears the previous outlook and guidance; late responses cannot replace the new selection.
 
-Select **Generate handling brief** after analysis to obtain operator handling steps and a resident-response draft. The app uses `/api/brief` to request structured guidance from the existing AutoRAG agent; numerical model results remain in the deterministic review summary. The resident-response draft is editable; **Copy response** copies the edited text, with manual selection offered if clipboard access is unavailable. Copy confirmation tells the operator to paste the response into their service system. Regenerating replaces the brief and draft; a failed regeneration preserves the previous brief, edits, and sources. The draft does not send a message or create a service ticket. Independent service-policy questions are collapsed by default and enabled after selecting a report. Their scope is explicit: service and neighborhood context, with no conversation memory or explanation of the classifier. Each output has its own source status. Review it and its supporting evidence before use. If the agent supplies no sources, the app explicitly says so. Source URLs in generated JSON are linked only when they match the bundled corpus; these are labeled as agent references rather than structured citations. Both guidance flows request source URLs. A malformed live brief or policy answer is reported as unavailable, without substituting sample guidance. With no guidance endpoint configured, the brief uses the matching bundled service document and is labeled as sample guidance.
+Select **Generate handling brief** to obtain operator steps and an editable resident-response draft. **Copy response** copies the edited text; if clipboard access fails, the app selects the draft for manual copying. Copying does not send a message or create a ticket. Regenerating replaces the brief and draft; a failed regeneration preserves the previous content and edits.
 
-The five reports are defined once in `data/sample-requests.json` and embedded into the page by the backend. Queue scores stay in browser memory. `service_catalog.py` shares service targets, sample-risk factors, and guidance filenames with the fixture generator. These changes need no database, additional deployment, or retraining. Calendar dates stay out of the forecast display: **Day 1–Day 7** works with the fixed demo history.
+**Ask about service policy** is collapsed by default and uses the selected service and neighborhood, with no conversation memory or explanation of the classifier. Each output has its own source status; review its evidence before use. See [reference and citation handling](#download-and-deploy-the-starter-kit). Malformed live guidance is reported as unavailable without substituting sample content.
+
+The five reports come from `data/sample-requests.json`; scores stay in browser memory. The backend derives `sla_days` from the shared service catalog and `opened_at` from scoring time. See `data/README.md` for fixture ownership and regeneration.
 
 The runner keeps TLS verification enabled for scoring endpoints. Unless `APP_ENDPOINT_CA_BUNDLE` is set, it saves the setup interpreter's trusted CA certificates under Git-ignored `run-results/automl/` and configures both scoring endpoints to use that bundle. This lets the standalone app verify the same certificates even when its Python installation has a different or empty trust store. Keep the referenced bundle when cleaning deployment files. For a cluster with a private CA, set `APP_ENDPOINT_CA_BUNDLE` to its PEM path before deployment. If endpoints were deployed before this runner version, re-run the same `--deploy ... --wait-deploy` command: it reuses the resources and refreshes `app-config.json`.
 
@@ -231,10 +215,6 @@ If you need to remove demo endpoints later, use the actual InferenceService and 
 oc delete inferenceservice YOUR_TABULAR_SERVICE YOUR_TIMESERIES_SERVICE -n YOUR_PROJECT
 oc delete servingruntime YOUR_TABULAR_SERVICE YOUR_TIMESERIES_SERVICE -n YOUR_PROJECT
 ```
-
-Pipeline submission uses bundled synthetic data and existing connections. AutoRAG deployment additionally downloads generated code and delegates creation of serving resources, Routes, service accounts, and authentication secrets to the starter kit. Existing MaaS/database connection secrets must already exist in the project. The runner does not create a DSPA. `.env` is Git-ignored; do not share it or commit credentials.
-
-Route discovery prints its target and fails after `RHOAI_OPENSHIFT_API_TIMEOUT_SECONDS` (20 seconds by default) with guidance to verify `RHOAI_URL`, token permissions, VPN/network access, or set `RHOAI_KFP_URL` directly.
 
 ## What this demo uses
 
@@ -249,7 +229,7 @@ Route discovery prints its target and fails after `RHOAI_OPENSHIFT_API_TIMEOUT_S
 The fast path performs submission and deployment for you. Use the sections below to inspect parameters or perform the steps manually; do not repeat training after a successful automated run.
 
 1. [Prerequisites](#1-prerequisites)
-2. [Upload the bundled fixtures and submit runs](#automated-cluster-run)
+2. [Upload the bundled fixtures](#upload-to-s3-compatible-storage)
 3. [Train AutoML models](#3-train-automl-models)
 4. [Deploy the selected AutoML models](#deploy-the-selected-automl-models)
 5. [Run AutoRAG](#4-run-autorag)
@@ -268,14 +248,14 @@ You need Python 3.9 or later and an available local port 8000. No Python package
 Ask the platform administrator to confirm each item before running the pipelines:
 
 - You have **Editor** access to the project.
-- A pipeline server can run the managed AutoML and AutoRAG pipelines, or matching definitions have been imported. If using the dashboard, the AutoML and Gen AI/AutoRAG views are enabled.
+- An existing pipeline server can run the managed AutoML and AutoRAG pipelines, or matching definitions have been imported. The runner does not create a DSPA. If using the dashboard, the AutoML and Gen AI/AutoRAG views are enabled.
 - Compute quota supports the `speed` preset (4 vCPU, 16 GiB) and, if used, `balanced` (8 vCPU, 32 GiB).
 - One existing S3 connection, named in `.env` as `S3_CONNECTION_NAME`, is available to AutoML, AutoRAG evaluation/documents, and KServe deployment. It contains `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_S3_ENDPOINT`; region is optional. Use the documented advanced overrides only when those stages genuinely use different connections.
 - A MaaS secret exists with `MAAS_BASE_URL` and `MAAS_API_KEY`.
 - A remote Milvus secret (`MILVUS_*`, minimum `MILVUS_URI`) or PGVector secret (`PGVECTOR_*`) exists. Inline vector databases are unsupported.
 - You know at least one embedding-model ID and one generation-model ID exposed by MaaS. The AutoRAG pipeline requires explicit lists.
 
-Record the project, secret *names*, bucket names, S3 prefix, MaaS secret, and database secret in a private handoff. Never commit secret values or send them to the browser.
+Record the project, secret *names*, bucket names, S3 prefix, MaaS secret, and database secret in a private handoff. Keep `.env` private; never commit secret values or send them to the browser.
 
 **Continue only when:** required connections and secret names are available in the project.
 
@@ -471,9 +451,7 @@ cp app-config.example.json app-config.json
 
 Both AutoML and AutoRAG deployment update their own entries and preserve the others. `DEMO_APP_CONFIG_PATH` changes only the runner's output location; the app still reads repository-root `app-config.json`. Keep the default for normal use. The local server allowlists only UI assets and the rendered setup guide; it never serves `.env`, `app-config.json`, data files, or other repository files over HTTP.
 
-The `responses` URI points to the deployed starter kit. `/api/ask` includes the selected service and neighborhood; `/api/brief` includes all four report facts. Both use the same JSON request helper with `stream: false` and a 180-second guidance timeout. The page displays each complete answer. Structured citations appear when the endpoint returns them; both prompts request source URLs, and generated references are linked only when they match the bundled corpus. `endpoint_tokens.responses` overrides the shared `api_token` for guidance.
-
-The Python backend adapts native AutoGluon/KServe inputs and outputs. Keep endpoint URLs and all tokens, MaaS, S3, and database credentials in backend configuration.
+The backend adapts native AutoGluon/KServe inputs and outputs. `/api/ask` includes service and neighborhood; `/api/brief` includes all four report facts. Both guidance routes call the starter kit with `stream: false` and a 180-second timeout, then display the complete answer.
 
 ### Refresh credentials
 
@@ -482,6 +460,8 @@ For expired scoring credentials, update `RHOAI_TOKEN` in `.env` with a fresh tok
 For an expired guidance token, redeploy the existing successful AutoRAG run with `--deploy-autorag ... --apply`. This refreshes the kit's client/reviewer tokens and verifies the agent; it rebuilds and replaces the sandbox but does not rerun optimization or upload data. The kit requests a seven-day token lifetime, which cluster policy may shorten.
 
 After either change, stop and restart `python3 main.py`, then rescore the queue or retry guidance. Updating `.env` alone does not refresh credentials in a running app. A changed MaaS credential belongs in the cluster connection secret used by the agent, not in the app's `responses` token.
+
+### Backend routes
 
 | Route | Source | Response contract |
 | --- | --- | --- |
@@ -498,7 +478,7 @@ Use the generated notebooks, endpoint contracts, and `pattern.json` as the sourc
 
 Before presentation, verify:
 
-- Classification uses only published features and returns SLA-miss probabilities with `PREDICT_PROBA=true` on the tabular service. Confirm `risk` is the probability of class `1`; `sla_days` is a service target, not predicted resolution time.
+- Classification uses only published features and returns SLA-miss probabilities with `PREDICT_PROBA=true` on the tabular service. Confirm `risk` is the probability of class `1`; `sla_days` is a service target, not predicted resolution time. Probability calibration has not been assessed for this demo.
 - Forecast returns exactly seven daily points for the selected service/neighborhood, labeled Day 1–Day 7.
 - Review policy answers against the configured corpus. Source status must distinguish returned citations, generated references, and answers without sources; clickable citations require URL metadata from the agent.
 - Out-of-corpus questions return a clear limitation, not fabricated policy.
@@ -512,6 +492,7 @@ Keep project/run URLs, artifact IDs, adapter URL, secret-manager location, data 
 | Symptom | Check |
 | --- | --- |
 | AutoML cannot see a CSV | S3 secret, bucket/key, UTF-8/comma CSV, header row, permissions. |
+| Pipeline Route discovery times out | Verify `RHOAI_URL`, token permissions, and VPN/network access. Discovery times out after `RHOAI_OPENSHIFT_API_TIMEOUT_SECONDS` (default 20). Set `RHOAI_KFP_URL` to use a direct pipeline URL. |
 | Classification metric is misleading | Class balance, temporal validation, precision/recall at alert threshold. |
 | AutoRAG cannot find document keys | `correct_answer_document_keys` exactly match uploaded S3 object keys. |
 | AutoRAG cannot start | Test-data S3, document S3, MaaS, Milvus/PGVector, embedding list, generation list. |

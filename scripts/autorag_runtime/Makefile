@@ -4,7 +4,7 @@ OPENSHELL_SANDBOX   ?= $(shell if [ -f .env ]; then . ./.env; fi; echo $${OPENSH
 OPENSHELL_NAMESPACE ?= $(shell if [ -f .env ]; then . ./.env; fi; echo $${OPENSHELL_NAMESPACE:-openshell})
 OPENSHELL_IMAGE     := openshell-agentic-rag
 
-.PHONY: env run-app run-cli refresh-certs build-openshell create-sandbox wait-sandbox setup-egress start-agent expose-agent deploy-openshell undeploy-openshell test help
+.PHONY: env run-app refresh-certs build-openshell create-sandbox wait-sandbox setup-egress start-agent expose-agent deploy-openshell undeploy-openshell test help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
@@ -24,10 +24,6 @@ run-app: ## Run agent locally with hot-reload
 	    exit 1; \
 	  fi && \
 	  uv run uvicorn main:app --host 127.0.0.1 --port $${PORT:-8000} --reload --reload-exclude .venv
-
-run-cli: ## Run interactive CLI chat (no web server)
-	@source .venv/bin/activate && set -a && source .env && set +a && \
-	  echo "CLI mode not yet configured. Use: make run-app"
 
 test: ## Run unit tests
 	uv run --extra dev python -m pytest tests/ $(PYTEST_ARGS)
