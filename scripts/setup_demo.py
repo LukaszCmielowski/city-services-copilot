@@ -69,9 +69,13 @@ def main() -> None:
 
     print("City Services Copilot setup\n")
     print("This guided flow uses the bundled synthetic data and your existing cluster connections.")
-    print("AutoRAG deployment downloads its generated kit and creates serving resources, including authentication secrets.")
+    if args.deploy_autorag or (
+        args.only in {"all", "autorag"} and (args.auto_deploy or args.auto_deploy_autorag)
+    ):
+        print("AutoRAG deployment requires a preinstalled Red Hat gateway in openshell and running local Podman.")
+        print("It prepares the downstream kit, refreshes gateway authentication, and creates serving resources and agent tokens.")
     if run([*runner, "--dry-run"]) != 0:
-        print("\nFix the reported .env or bundled-data issue before continuing.", file=sys.stderr)
+        print("\nResolve the preflight error above before continuing. Use actual run IDs in deployment commands.", file=sys.stderr)
         raise SystemExit(1)
 
     if args.dry_run:

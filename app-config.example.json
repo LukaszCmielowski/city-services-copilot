@@ -1,5 +1,10 @@
 {
-  "api_token": "replace-with-your-api-key-or-token",
+  "api_token": "replace-with-your-openshift-fallback-token",
+  "endpoint_tokens": {
+    "tabular_scoring": "replace-with-your-openshift-token",
+    "timeseries_scoring": "replace-with-your-openshift-token",
+    "responses": "replace-with-your-agent-client-token"
+  },
   "responses_auth_header": "X-Api-Key",
   "endpoints": {
     "tabular_scoring": "https://YOUR-ENDPOINT/v1/models/resolution-risk:predict",

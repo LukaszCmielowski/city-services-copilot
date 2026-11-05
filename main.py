@@ -489,7 +489,8 @@ def markdown_guide(markdown):
         elif match := re.match(r"^(#{1,4})\s+(.+)$", line):
             flush_paragraph(); close_list()
             level = len(match.group(1))
-            output.append(f"<h{level}>{markdown_inline(match.group(2))}</h{level}>")
+            anchor = re.sub(r"[^\w -]", "", match.group(2).lower()).strip().replace(" ", "-")
+            output.append(f'<h{level} id="{anchor}">{markdown_inline(match.group(2))}</h{level}>')
         elif line.startswith("> "):
             flush_paragraph(); close_list()
             output.append(f"<blockquote>{markdown_inline(line[2:])}</blockquote>")

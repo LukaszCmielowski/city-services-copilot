@@ -1,14 +1,16 @@
 # City Services Copilot
 
-An end-to-end city-services demo: AutoML predicts 311 resolution risk and demand, while AutoRAG answers service-policy questions using official city documents.
+An end-to-end city-services demo: AutoML predicts 311 resolution risk and demand, while AutoRAG turns service guidance into operator next steps and resident-response drafts.
 
-This is the single setup guide. Complete the sections in order.
+This is the single setup guide. Use the fast path for an automated deployment; the later sections describe the individual steps for manual setup and troubleshooting.
 
 ## What the sample app looks like
 
 The app starts with five bundled sample 311 requests. Score the queue to rank estimated SLA-miss risk, select a request to review its seven-day demand outlook, then generate operator handling steps and a resident-response draft using service guidance.
 
-![City Services Copilot sample UI](docs/assets/sample-ui.png)
+![Current City Services Copilot workspace: scored request queue, SLA-miss risk, seven-day demand forecast, and handling brief with references](docs/assets/sample-ui.png)
+
+The screenshot shows live model estimates for synthetic sample reports and an agent-generated draft with references. Results vary by model and run.
 
 ## The use case: help 311 teams triage service requests
 
@@ -28,7 +30,7 @@ The bundled fixtures are synthetic and the sample-mode results are illustrative.
 
 The repository already contains safe, synthetic fixture CSVs, a twenty-two-document AutoRAG guidance corpus, and evaluation data. For a first end-to-end run, do **not** download, transform, or prepare data.
 
-After the one-time platform prerequisites are ready, the demo user only needs to:
+After the [platform prerequisites](#1-prerequisites) and [AutoRAG deployment prerequisites](#deploy-and-connect-the-best-autorag-starter-kit) are ready:
 
 1. Create their private environment file and install the runner dependencies:
 
@@ -39,16 +41,16 @@ After the one-time platform prerequisites are ready, the demo user only needs to
 
    Fill only the values shown in `.env`: cluster URL, token, project, S3 endpoint/credentials/bucket, one shared `S3_CONNECTION_NAME`, MaaS/vector-database connection names, and MaaS model IDs. The runner discovers the existing `ds-pipeline` Route from `RHOAI_URL` and derives the remaining demo defaults.
 
-2. Review the planned upload and submissions, then execute them:
+2. Preview the plan, then upload, train, deploy, and test all three services:
 
    ```bash
-   python3 scripts/run_cluster_demo.py --dry-run
-   python3 scripts/run_cluster_demo.py
+   python3 scripts/setup_demo.py --auto-deploy --dry-run
+   python3 scripts/setup_demo.py --auto-deploy --apply
    ```
 
-3. Start the app with `python3 main.py`, then open `http://localhost:8000`.
+3. After deployment succeeds, start the app with `python3 main.py`, then open `http://localhost:8000`. Restart an already running backend to load the saved endpoints and credentials.
 
-To enable live guidance after AutoRAG succeeds, follow [Invoke the selected AutoRAG pattern](#invoke-the-selected-autorag-pattern): deploy and connect the generated starter kit.
+For a local preview without a cluster, run `python3 main.py` with no `app-config.json`. The app labels its results as sample estimates and sample guidance.
 
 The repository contains deterministic synthetic fixtures with 5,000 tabular rows, 7,300 time-series rows across all 20 service/neighborhood series, twenty-two guidance documents, and thirteen AutoRAG evaluation questions. The CSVs exceed the AutoML 1,000-record minimum and make a more realistic pipeline exercise. They are still not intended to produce credible quality metrics. Recreate the CSVs with `python3 scripts/generate_demo_fixtures.py` if needed.
 
@@ -67,9 +69,24 @@ python3 scripts/setup_demo.py --auto-deploy --dry-run
 python3 scripts/setup_demo.py --auto-deploy --apply
 ```
 
-This uploads the bundled inputs, submits and monitors all three pipelines, deploys the best tabular and time-series predictors, deploys the generated AutoRAG starter kit, tests authenticated scoring and guidance, and saves all three endpoints and their tokens to private `app-config.json`. Current starter kits require an OpenShell gateway already installed on the cluster and registered/selected locally as `openshift`. Local dependencies and platform prerequisites are listed below. Use `--only tabular`, `--only timeseries`, or `--only autorag` with `--auto-deploy` to complete one pipeline. `--auto-deploy-automl` and `--auto-deploy-autorag` select which results to deploy after submission.
+This uploads the bundled inputs, submits and monitors all three pipelines, deploys the best tabular and time-series predictors, deploys the generated AutoRAG starter kit, tests authenticated scoring and guidance, and saves all three endpoints and their tokens to private `app-config.json`. AutoRAG requires an OpenShell gateway already installed on the cluster; the runner refreshes its mTLS certificates and registers it locally as `openshift` when needed. Local dependencies and platform prerequisites are listed below. Use `--only tabular`, `--only timeseries`, or `--only autorag` with `--auto-deploy` to complete one pipeline. `--auto-deploy-automl` and `--auto-deploy-autorag` select which results to deploy after submission.
 
 To finish existing successful runs without uploading data or retraining, use `--deploy TABULAR_RUN_ID TIMESERIES_RUN_ID`; the setup wrapper automatically waits for readiness and tests both models. Add `--deploy-autorag AUTORAG_RUN_ID` to deploy guidance in the same command. An already connected AutoRAG endpoint is preserved when deploying only AutoML.
+
+Replace every `*_RUN_ID` placeholder with an actual successful run ID from your pipeline results. Do not pass the placeholder literally.
+
+### Rerun without uploading data
+
+Choose whether you need a new optimization run or only deployment:
+
+| Goal | Command |
+| --- | --- |
+| Rerun all three pipelines and deploy their new results | `python3 scripts/setup_demo.py --skip-upload --auto-deploy --apply` |
+| Rerun only AutoRAG optimization and deploy its new result | `python3 scripts/setup_demo.py --only autorag --skip-upload --auto-deploy-autorag --apply` |
+| Redeploy an existing successful AutoRAG run | `python3 scripts/setup_demo.py --deploy-autorag AUTORAG_RUN_ID --apply` |
+| Redeploy existing successful AutoML runs | `python3 scripts/setup_demo.py --deploy TABULAR_RUN_ID TIMESERIES_RUN_ID --apply` |
+
+Use `--skip-upload` only when the same input objects already exist at the configured bucket and keys. Redeployment reads existing run artifacts and does not submit pipelines, upload fixtures, or re-index documents. Add `--dry-run` to preview any command. Restart the app after its configuration changes.
 
 ### Automated cluster run
 
@@ -136,7 +153,7 @@ python3 scripts/setup_demo.py --only autorag --auto-deploy-autorag --apply
 
 Current starter kits require a ready Red Hat OpenShell gateway in the cluster's `openshell` namespace and the Red Hat build of the Agent Sandbox operator. Install `oc`, `podman`, `uv`, `make`, `curl`, and Python locally. Podman must be running; on macOS, start its machine if needed. The kit runs the RHOAI CLI in a container, so a local OpenShell CLI installation is no longer required. `make refresh-certs` retrieves mTLS certificates and registers the cluster gateway as `openshift`. Gateway installation remains a separate administrator prerequisite. The OpenShift internal image registry must be available, the generation model must support tool calling, and the pattern's collection must already be indexed.
 
-The runner uses one deployment runtime: the bundled ai4rag v0.25.4 [downstream templates](https://github.com/IBM/ai4rag/tree/e9472f1b72d9486c23f07f6390b55dac66468fe9/ai4rag/assets_generator/starter_kit_templates/agentic_rag), verified 2026-11-04. For each deployment, it prepares `Makefile`, `Containerfile.openshell`, `proxychains_entrypoint.py`, and `README.md` from those pinned templates. The archive's original deployment files and source provenance remain outside the image build context in `original-runtime/`. The optimized `agentic_rag` application, configuration, and collection come from the selected successful run.
+The runner uses one deployment runtime: the bundled ai4rag v0.25.4 [downstream templates](https://github.com/IBM/ai4rag/tree/e9472f1b72d9486c23f07f6390b55dac66468fe9/ai4rag/assets_generator/starter_kit_templates/agentic_rag), verified 2026-11-04, with local adjustments recorded in `scripts/autorag_runtime/PROVENANCE.md`. For each deployment, it prepares `Makefile`, `Containerfile.openshell`, `proxychains_entrypoint.py`, and `README.md` from this bundled runtime. The archive's original deployment files and source provenance remain outside the image build context in `original-runtime/`. The optimized `agentic_rag` application, configuration, and collection come from the selected successful run.
 
 The runner:
 
@@ -149,6 +166,20 @@ The runner:
 7. Atomically merges `endpoints.responses`, `endpoint_tokens.responses`, `responses_auth_header: "X-Api-Key"`, and endpoint TLS settings into the private app configuration. It removes any old BFF template and preserves existing AutoML URLs, tokens, and feature importance. Restart `python3 main.py` to load it.
 
 Deployment files and a private log remain under Git-ignored `run-results/autorag/`. The temporary kubeconfig is outside the image build context, targets `RHOAI_URL` and `RHOAI_PROJECT_NAME`, and is removed after deployment. App credentials and logs use owner-only file permissions. A failed build or endpoint check leaves the app configuration unchanged; cluster resources already created remain available for inspection. Re-running deployment rebuilds the image and replaces the demo sandbox. The kit shares the Route name, `agent-client` service account, and `agent-client-token` secret, so run one demo deployment at a time. It requests 168-hour client/reviewer tokens; cluster policy may shorten their lifetime. Re-deploy before token expiry.
+
+#### Deployment namespaces and Agent Ops
+
+`RHOAI_PROJECT_NAME` selects the pipeline, image-build, connection-secret, and agent-client-token project. The gateway manages the Sandbox in its own namespace, `openshell`; with the default sandbox name, its Kubernetes resource is `default--city-services-rag`. Changing the current `oc` project does not move it. In Agent Ops, select **All projects** or **openshell** to see this deployment.
+
+The original v0.25.4 starter-kit template hardcodes `openshell`; it is not an empty field the user must fill. Our prepared Makefile adds `OPENSHELL_NAMESPACE`, defaulting to `openshell`, for standalone use with another existing gateway. The demo runner still validates and discovers gateway resources in `openshell`; other gateway namespaces are not supported by its complete deployment flow.
+
+The agent uses LangChain. The starter-kit deployment currently omits the top-level Sandbox annotation `opendatahub.io/agent-framework: langchain`, so Agent Ops may leave **Framework** blank. The generator fix is tracked in [RHAI-19949](https://redhat.atlassian.net/browse/RHAI-19949). To set it on an existing default demo deployment, using `oc` authenticated to the intended cluster:
+
+```bash
+oc annotate sandbox default--city-services-rag -n openshell opendatahub.io/agent-framework=langchain --overwrite
+```
+
+Substitute the actual Sandbox resource name if customized. This annotation does not require an image rebuild; it must be reapplied if deployment replaces the Sandbox until the generator fix is available.
 
 Optional overrides:
 
@@ -194,17 +225,11 @@ The five reports are defined once in `data/sample-requests.json` and embedded in
 
 The runner keeps TLS verification enabled for scoring endpoints. Unless `APP_ENDPOINT_CA_BUNDLE` is set, it saves the setup interpreter's trusted CA certificates under Git-ignored `run-results/automl/` and configures both scoring endpoints to use that bundle. This lets the standalone app verify the same certificates even when its Python installation has a different or empty trust store. Keep the referenced bundle when cleaning deployment files. For a cluster with a private CA, set `APP_ENDPOINT_CA_BUNDLE` to its PEM path before deployment. If endpoints were deployed before this runner version, re-run the same `--deploy ... --wait-deploy` command: it reuses the resources and refreshes `app-config.json`.
 
-For the runs printed by the example submission, use one line to avoid shell line-continuation mistakes:
+If you need to remove demo endpoints later, use the actual InferenceService and matching ServingRuntime names printed by deployment:
 
 ```bash
-python3 scripts/run_cluster_demo.py --deploy 840dbfed-0526-4340-b1ee-c130fe73d3c5 59967b67-4d3b-4253-831b-065961aebadd --wait-deploy
-```
-
-If you need to remove these demo endpoints later, delete only the two named resources in the demo project:
-
-```bash
-oc delete inferenceservice city-services-tabular-840dbfed city-services-timeseries-59967b67 -n YOUR_PROJECT
-oc delete servingruntime city-services-tabular-840dbfed city-services-timeseries-59967b67 -n YOUR_PROJECT
+oc delete inferenceservice YOUR_TABULAR_SERVICE YOUR_TIMESERIES_SERVICE -n YOUR_PROJECT
+oc delete servingruntime YOUR_TABULAR_SERVICE YOUR_TIMESERIES_SERVICE -n YOUR_PROJECT
 ```
 
 Pipeline submission uses bundled synthetic data and existing connections. AutoRAG deployment additionally downloads generated code and delegates creation of serving resources, Routes, service accounts, and authentication secrets to the starter kit. Existing MaaS/database connection secrets must already exist in the project. The runner does not create a DSPA. `.env` is Git-ignored; do not share it or commit credentials.
@@ -217,9 +242,11 @@ Route discovery prints its target and fails after `RHOAI_OPENSHIFT_API_TIMEOUT_S
 | --- | --- | --- |
 | Resolution risk | `autogluon-tabular-training-pipeline` | Estimated SLA-miss probability, class at a 50% cutoff, and service SLA target. |
 | Demand forecast | `autogluon-timeseries-training-pipeline` | Seven daily volumes after the bundled series ends. |
-| Grounded guidance | `documents-rag-optimization-pipeline` | Answer for the selected request. Source links appear when the endpoint returns them. |
+| Service guidance | `documents-rag-optimization-pipeline` | Handling steps and a resident-response draft. References and citations are labeled separately when returned. |
 
-## Setup order
+## Manual setup reference
+
+The fast path performs submission and deployment for you. Use the sections below to inspect parameters or perform the steps manually; do not repeat training after a successful automated run.
 
 1. [Prerequisites](#1-prerequisites)
 2. [Upload the bundled fixtures and submit runs](#automated-cluster-run)
@@ -238,12 +265,11 @@ You need Python 3.9 or later and an available local port 8000. No Python package
 
 ### OpenShift AI project
 
-Ask the platform administrator to confirm each item before data preparation:
+Ask the platform administrator to confirm each item before running the pipelines:
 
 - You have **Editor** access to the project.
 - A pipeline server can run the managed AutoML and AutoRAG pipelines, or matching definitions have been imported. If using the dashboard, the AutoML and Gen AI/AutoRAG views are enabled.
 - Compute quota supports the `speed` preset (4 vCPU, 16 GiB) and, if used, `balanced` (8 vCPU, 32 GiB).
-- An AutoML S3 secret exists with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_ENDPOINT`, and `AWS_DEFAULT_REGION`.
 - One existing S3 connection, named in `.env` as `S3_CONNECTION_NAME`, is available to AutoML, AutoRAG evaluation/documents, and KServe deployment. It contains `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_S3_ENDPOINT`; region is optional. Use the documented advanced overrides only when those stages genuinely use different connections.
 - A MaaS secret exists with `MAAS_BASE_URL` and `MAAS_API_KEY`.
 - A remote Milvus secret (`MILVUS_*`, minimum `MILVUS_URI`) or PGVector secret (`PGVECTOR_*`) exists. Inline vector databases are unsupported.
@@ -262,7 +288,8 @@ data/
 ├── prepared/
 │   ├── resolution-risk.csv
 │   └── service-demand-daily.csv
-├── guidance/                    # current, official city documents
+├── sample-requests.json          # five fixed reports shown in the app
+├── guidance/                    # original demo summaries with official links
 └── autorag-evaluation.json
 ```
 
@@ -278,7 +305,7 @@ It verifies schema, UTF-8, non-empty files, evaluation JSON, and full S3 documen
 
 ### Upload to S3-compatible storage
 
-Use the included uploader after configuring the AWS CLI with credentials that can write to the target bucket. It uploads the bundled prepared AutoML data, guidance documents, and evaluation JSON. It runs in dry-run mode by default:
+The cluster runner uploads all inputs automatically. For a manual upload, use the included uploader after configuring the AWS CLI with credentials that can write to the target bucket. It uploads the bundled prepared AutoML data, guidance documents, and evaluation JSON. It runs in dry-run mode by default:
 
 ```bash
 scripts/upload_demo_data.sh \
@@ -294,7 +321,7 @@ The uploader uses these exact object keys:
 ```text
 city-services-copilot/automl/resolution-risk.csv
 city-services-copilot/automl/service-demand-daily.csv
-city-services-copilot/autorag/guidance/<official-guidance-files>
+city-services-copilot/autorag/guidance/<guidance-files>
 city-services-copilot/autorag/autorag-evaluation.json
 ```
 
@@ -379,36 +406,37 @@ Deploy the generated starter kit after optimization succeeds. The app uses its n
 
 #### Download and deploy the starter kit
 
-The [automated starter-kit deployment](#deploy-and-connect-the-best-autorag-starter-kit) performs these steps and connects the app. The instructions below describe the manual path.
+The [automated starter-kit deployment](#deploy-and-connect-the-best-autorag-starter-kit) prepares the supported runtime and connects the app. The instructions below describe manual inspection and deployment. An older downloaded archive may contain different deployment instructions; use the runner to prepare this repository's supported runtime rather than combining commands from different versions.
 
 1. Open the successful AutoRAG run's results and download `starter_kit.zip`. If using object storage, find that exact key under the run's optimization artifacts; do not infer it from a model-scoring URL. Also retain the selected `pattern.json` and confirm the kit's `agent_config.json` names the intended model and collection.
 2. Extract the archive into a private working directory and read its README. The current downstream kit requires `oc`, running `podman`, `uv`, `make`, Python, `curl`, the Agent Sandbox operator, and a preinstalled Red Hat cluster gateway. It runs the RHOAI CLI in a container. Use the automated runner above to prepare the pinned downstream deployment files from an existing successful run. Its generation model must support tool calling.
-3. Review `values.yaml`: use the intended project, existing MaaS/database secret names, reachable services, and indexed collection. Follow the archive's deployment instructions. For the current kit, run these commands from its `starter_kit` directory:
+3. Confirm `oc` targets the intended cluster and build project. Review `values.yaml` for the pattern and existing MaaS/database secret names, and `agent_config.json` for models and the indexed collection. For the runner-prepared kit, run these commands from its `starter_kit` directory:
 
 ```bash
 uv lock --upgrade-package ai4rag
-make build-openshell
 make refresh-certs
+make build-openshell
 make deploy-openshell
 ```
 
 An administrator installs the gateway separately; `make refresh-certs` registers it locally with its mTLS certificates. The deployment creates cluster resources and exposes an agent Route. Do not run `make load-docs` against the existing collection; use the separate indexing workflow when needed.
 
-4. Record the resulting Route and API key using the kit's deployment output/instructions. Check the deployed `/docs` contract, then invoke it with a city-services question:
+4. Record the resulting Route and API key using the kit's deployment output/instructions. Check the deployed `/docs` contract, then invoke it with a city-services question. For the gateway-generated CA, pass `--cacert /path/to/gateway-ca.crt` to curl; the prepared kit saves it under `~/.config/openshell/gateways/openshift/mtls/ca.crt` by default.
 
 ```bash
 export AUTORAG_AGENT_URL='https://YOUR-AGENT-ROUTE'
 # Set AUTORAG_AGENT_TOKEN privately to the deployed agent's API key.
 curl --fail-with-body --silent --show-error \
+  --cacert "$HOME/.config/openshell/gateways/openshift/mtls/ca.crt" \
   "${AUTORAG_AGENT_URL%/}/v1/responses" \
   -H "X-Api-Key: ${AUTORAG_AGENT_TOKEN}" \
   -H 'Content-Type: application/json' \
   --data '{"input":"How should an operator route an illegal-dumping report?","stream":false}'
 ```
 
-5. In the existing `app-config.json`, set `endpoints.responses` to that `/v1/responses` URL, `endpoint_tokens.responses` to the agent API key, `responses_auth_header` to `"X-Api-Key"`. Preserve the existing AutoML endpoint configuration. Restart `python3 main.py` and ask the same question in the guidance panel.
+5. In the existing `app-config.json`, set `endpoints.responses` to that `/v1/responses` URL, `endpoint_tokens.responses` to the agent API key, and `responses_auth_header` to `"X-Api-Key"`. For a gateway-generated CA, preserve the runner's `endpoint_ca_bundles.responses` and `endpoint_tls_strict.responses` settings, or use automated deployment to configure and verify them. Preserve the existing AutoML endpoint configuration. Restart `python3 main.py` and ask the same question in the guidance panel.
 
-The [current agent implementation](https://github.com/IBM/ai4rag/blob/main/ai4rag/assets_generator/starter_kit_templates/agentic_rag/main.py) returns answer text without structured citation metadata. Both app guidance prompts request structured JSON containing source URLs. The app labels generated URLs matching the bundled corpus as **Agent references**, preserving structured citations separately when provided. An answer without accepted references says **No references returned · verify before use**. Corpus matching validates the URL, not whether the document was retrieved or supports every claim; review the linked guidance before use.
+Starter-kit agents, including the [v0.25.4 implementation](https://github.com/IBM/ai4rag/blob/e9472f1b72d9486c23f07f6390b55dac66468fe9/ai4rag/assets_generator/starter_kit_templates/agentic_rag/main.py), can return answer text without structured citation metadata. Both app guidance prompts request structured JSON containing source URLs. The app labels generated URLs matching the bundled corpus as **Agent references**, preserving structured citations separately when provided. An answer without accepted references says **No references returned · verify before use**. Corpus matching validates the URL, not whether the document was retrieved or supports every claim; review the linked guidance before use.
 
 **Continue only when:** invocation succeeds directly and through `/api/ask`, and the answer's evidence comes from the intended collection.
 
@@ -426,17 +454,34 @@ Open [http://localhost:8000](http://localhost:8000). Select **Score sample reque
 
 Deploy the selected tabular and time-series AutoML models as scoring endpoints. The backend scores the queue through the tabular endpoint and requests the matching forecast when a report is selected. Configure AutoRAG using [the starter kit above](#invoke-the-selected-autorag-pattern).
 
-For this sample, the user only needs to provide an API key/token and the three endpoint URIs. Copy the template and fill in those values:
+Automated deployment writes the private app configuration for you. For first-time manual configuration only, copy the template and fill in endpoint URLs and separate credentials. Preserve an existing configuration rather than overwriting it:
 
 ```bash
 cp app-config.example.json app-config.json
 ```
 
-`app-config.json` is ignored by Git and is read only by the Python backend. Start the app normally with `python3 main.py`; when an endpoint URI is configured, its matching route forwards the request to that endpoint. Authentication defaults to `Authorization: Bearer <api_token>`; guidance can override the token and use `X-Api-Key` as described above. The deployment runner creates or updates the tabular and time-series entries automatically after those KServe services are ready; add the AutoRAG `responses` entry separately. Omit the file to keep using local sample mode. The local server allowlists only the UI assets, screenshot, and rendered setup guide; it never serves `.env`, `app-config.json`, data files, or other repository files over HTTP.
+`app-config.json` is ignored by Git and loaded once, at backend startup. The app does not load `.env`. Start it with `python3 main.py`; each configured endpoint enables live inference for its matching feature, while unconfigured features use sample mode. Omit the file for an entirely local sample.
+
+| Configuration | Credential / purpose |
+| --- | --- |
+| `endpoint_tokens.tabular_scoring`, `endpoint_tokens.timeseries_scoring` | OpenShift bearer tokens with access to the KServe endpoints. The runner copies `RHOAI_TOKEN` after successful endpoint tests. |
+| `endpoint_tokens.responses` | Separate agent-client service-account token, sent with `responses_auth_header: "X-Api-Key"`. This is not the MaaS API key. |
+| `api_token` | Required string; fallback bearer token when a per-endpoint token is absent. |
+| `endpoint_ca_bundles`, `endpoint_tls_strict` | Endpoint-specific TLS settings written and tested by deployment. Keep referenced CA files. |
+
+Both AutoML and AutoRAG deployment update their own entries and preserve the others. `DEMO_APP_CONFIG_PATH` changes only the runner's output location; the app still reads repository-root `app-config.json`. Keep the default for normal use. The local server allowlists only UI assets and the rendered setup guide; it never serves `.env`, `app-config.json`, data files, or other repository files over HTTP.
 
 The `responses` URI points to the deployed starter kit. `/api/ask` includes the selected service and neighborhood; `/api/brief` includes all four report facts. Both use the same JSON request helper with `stream: false` and a 180-second guidance timeout. The page displays each complete answer. Structured citations appear when the endpoint returns them; both prompts request source URLs, and generated references are linked only when they match the bundled corpus. `endpoint_tokens.responses` overrides the shared `api_token` for guidance.
 
 The Python backend adapts native AutoGluon/KServe inputs and outputs. Keep endpoint URLs and all tokens, MaaS, S3, and database credentials in backend configuration.
+
+### Refresh credentials
+
+For expired scoring credentials, update `RHOAI_TOKEN` in `.env` with a fresh token for the intended cluster and project. Exported environment variables take precedence over `.env`; update or unset an old exported `RHOAI_TOKEN` before running setup. Redeploy the existing successful AutoML runs with `--deploy ... --apply` to test both endpoints and refresh their app credentials without retraining. Alternatively, update both scoring entries in `endpoint_tokens` directly, preserving the guidance token and TLS settings.
+
+For an expired guidance token, redeploy the existing successful AutoRAG run with `--deploy-autorag ... --apply`. This refreshes the kit's client/reviewer tokens and verifies the agent; it rebuilds and replaces the sandbox but does not rerun optimization or upload data. The kit requests a seven-day token lifetime, which cluster policy may shorten.
+
+After either change, stop and restart `python3 main.py`, then rescore the queue or retry guidance. Updating `.env` alone does not refresh credentials in a running app. A changed MaaS credential belongs in the cluster connection secret used by the agent, not in the app's `responses` token.
 
 | Route | Source | Response contract |
 | --- | --- | --- |
@@ -470,7 +515,10 @@ Keep project/run URLs, artifact IDs, adapter URL, secret-manager location, data 
 | Classification metric is misleading | Class balance, temporal validation, precision/recall at alert threshold. |
 | AutoRAG cannot find document keys | `correct_answer_document_keys` exactly match uploaded S3 object keys. |
 | AutoRAG cannot start | Test-data S3, document S3, MaaS, Milvus/PGVector, embedding list, generation list. |
-| AutoRAG returns HTTP 401/403 | Match the chosen path's authentication header/token and project access; the agent API key and Dashboard token serve different endpoints. |
+| Queue scoring fails with HTTP 401/403 or no probability ranking | Refresh the scoring endpoint tokens, restart the backend, and rescore. If the response has only class labels, redeploy the tabular service to enable `PREDICT_PROBA=true`. See [Refresh credentials](#refresh-credentials). |
+| AutoRAG returns HTTP 401/403 | Use the agent-client token in `endpoint_tokens.responses` with `X-Api-Key`. Refresh expired kit tokens through deployment; do not substitute the MaaS API key. |
+| Answer has no references | Both prompts request source URLs, but the app links generated references only when they match the bundled corpus. Inspect the agent response and collection; do not treat an answer without accepted sources as verified guidance. |
+| Agent Ops does not list the deployment or Framework is blank | Select All projects or openshell. The Sandbox is gateway-managed there; the missing LangChain annotation is tracked in RHAI-19949. See [Deployment namespaces and Agent Ops](#deployment-namespaces-and-agent-ops). |
 | OpenShell reports no active gateway | Ensure the gateway is installed and ready in the `openshell` namespace. In the downstream kit, run `make refresh-certs` to fetch mTLS certificates and register `openshift` through the RHOAI CLI. The runner does this before checking authenticated status. |
 | Sandbox stays `Provisioning` with `ConfigurationInvalid` | Inspect supervisor logs and confirm the sandbox base image selected from the RHOAI CSV matches the installed platform. The runner inherits the downstream base image policy. |
 | Build log stream disconnects while the Build is still `Running` | The runner polls the Build status independently. Check the existing Build before retrying; a disconnected log stream does not mean the image build failed. |
@@ -484,15 +532,16 @@ Keep project/run URLs, artifact IDs, adapter URL, secret-manager location, data 
 | --- | --- |
 | `main.py` | Local web server, sample-mode behavior, and server-side endpoint client. |
 | `index.html`, `styles.css`, `app.js` | Interactive demo UI. |
-| `app-config.example.json` | Copyable endpoint URI and API-token configuration template. |
+| `app-config.example.json` | Endpoint URL and separate scoring/guidance token template. |
 | `service_catalog.py` | Shared service targets, synthetic risk factors, and guidance filenames. |
 | `data/sample-requests.json` | The five fixed reports shown in the queue. |
-| `data/README.md` | Local data-staging convention. |
+| `data/README.md` | Bundled fixtures, request queue, guidance corpus, and upload conventions. |
 | `data/autorag-evaluation.json` | Starter evaluation data. |
 | `scripts/validate_demo_inputs.py` | Dependency-free data preflight validator. |
 | `scripts/upload_demo_data.sh` | Validate and dry-run/upload prepared data to S3-compatible storage. |
 | `scripts/setup_demo.py` | Interactive confirmation and preflight for the `.env` cluster runner. |
-| `scripts/run_cluster_demo.py` | Non-interactive `.env` upload and managed-pipeline submission runner. |
+| `scripts/run_cluster_demo.py` | `.env`-driven upload, managed-pipeline submission, monitoring, deployment, and app configuration. |
 | `scripts/deploy_autorag.py` | Generated starter-kit download, OpenShift build/deployment, endpoint verification, and private app configuration. |
+| `scripts/autorag_runtime/` | Prepared downstream deployment files, their README, and pinned source provenance. |
 | `scripts/generate_demo_fixtures.py` | Regenerate the deterministic synthetic AutoML fixture CSVs. |
 | `.env.example`, `requirements-cluster.txt` | Cluster-runner configuration template and its Python dependencies. |

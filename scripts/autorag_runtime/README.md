@@ -3,7 +3,12 @@
 This project was generated from an optimized RAG pattern. Before deploying the
 application, make sure MaaS and the selected vector database are reachable.
 
-The indexed production collection is an input to this starter kit. Do not run
+These deployment instructions accompany the downstream runtime prepared by City
+Services Copilot. The downloaded archive's original deployment files are retained
+in the deployment workspace's `original-runtime/` directory, together with source
+provenance. Application code and optimized configuration remain from the run.
+
+The existing indexed collection is an input to this starter kit. Do not run
 `make load-docs` against it. Re-indexing belongs to the separate document
 indexing pipeline and could overwrite or corrupt the shared collection.
 
@@ -19,12 +24,12 @@ and answer using the evidence found.
   resources.
 - An OpenShell gateway installed on the cluster by an administrator (one-time
   cluster prerequisite, not part of this starter kit).
-- `podman` installed locally. The Makefile runs the OpenShell CLI from the RHOAI
+- `podman` installed and running locally (start its machine on macOS). The Makefile runs the OpenShell CLI from the RHOAI
   image in a container and stores the registration and the mTLS client
   certificates in `~/.config/openshell` (`OPENSHELL_CLI_STATE`), so no local
   OpenShell CLI installation is required.
 - `uv` installed locally to update the dependency lockfile.
-- `python3` and `curl` installed locally for image discovery and API CA checks.
+- `make`, `python3`, and `curl` installed locally for deployment, image discovery, and API CA checks.
 - An OpenShift AI MaaS deployment exposing chat and embedding models, together
   with credentials. The chat model must support tool calling so the agent can
   invoke the retriever.
@@ -55,14 +60,15 @@ Makefile's build selection.
 
 ### Commands
 
-Run the following commands from the starter-kit root directory:
+Run the following commands from the starter-kit root directory, with `oc`
+authenticated to the intended cluster and set to the build/connection project:
 
 ```bash
 # Generate the lockfile to the latest ai4rag release before building.
 uv lock --upgrade-package ai4rag
 
-make build-openshell
 make refresh-certs
+make build-openshell
 make deploy-openshell
 ```
 
@@ -79,7 +85,17 @@ make refresh-certs
 This target pulls the client certificates from the `openshell-client-tls` secret
 and registers the `openshell-gateway` route as gateway `openshift`. Re-run it
 after the cluster gateway is recreated or the certificates are rotated.
-For another gateway namespace, export `OPENSHELL_NAMESPACE` (default `openshell`).
+The gateway and its managed Sandboxes live in `openshell` by default. Image
+builds, connection secrets, and `agent-client-token` use the current `oc` project.
+The Sandbox resource is `default--<sandbox-name>` in the gateway namespace;
+the standalone kit defaults to `rag-sandbox`, while the demo runner selects
+`city-services-rag` through `OPENSHELL_SANDBOX_NAME`.
+
+This prepared Makefile adds `OPENSHELL_NAMESPACE` (default `openshell`) for
+standalone use with another existing gateway. The original v0.25.4 template
+hardcodes `openshell`; it does not ask the end user to fill an empty namespace.
+Changing this variable or the current project does not relocate a gateway-managed
+Sandbox. The demo runner's complete flow currently supports `openshell` only.
 Pass `OPENSHELL_GATEWAY_NAME=<name>` or `OPENSHELL_CLI_STATE=<directory>` to `make`
 when using another registration name or host state directory. Use the same settings
 as the administrator's gateway setup. The gateway must be compatible with the
@@ -100,6 +116,17 @@ the sandbox during deployment. You can edit values such as `temperature` or
 `system_message` and rerun `make deploy-openshell` without rebuilding the image.
 Rebuild the image only after changing application code or dependencies.
 
+The kit requests client/reviewer service-account tokens valid for 168 hours;
+cluster policy may shorten that lifetime. Redeploy before expiry and update any
+client configuration with the newly issued agent-client token. In the demo app,
+restart the backend after updating `app-config.json`.
+
+In Agent Ops, select the gateway namespace or All projects. The current kit omits
+the Sandbox's `opendatahub.io/agent-framework: langchain` annotation, so Framework
+may be blank. The generator fix is tracked in
+[RHAI-19949](https://redhat.atlassian.net/browse/RHAI-19949); until then, annotate
+the actual Sandbox after deployment if that metadata is needed.
+
 ## API and Swagger
 
 After deployment, the Swagger/OpenAPI documentation is available at
@@ -108,11 +135,20 @@ After deployment, the Swagger/OpenAPI documentation is available at
 The Responses API can be called at `https://<agent-route>/v1/responses`:
 
 ```bash
-curl -sk https://<agent-route>/v1/responses \
+# Run in the project containing the kit's agent-client-token secret.
+TOKEN="$(oc get secret agent-client-token -o jsonpath='{.data.token}' | base64 -d)"
+curl --fail-with-body --silent --show-error \
+  --cacert "$HOME/.config/openshell/gateways/openshift/mtls/ca.crt" \
+  'https://YOUR-AGENT-ROUTE/v1/responses' \
   -H "X-Api-Key: $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"input":"What is vLLM?"}'
+  --data '{"input":"What guidance is available in this collection?","stream":false}'
 ```
+
+Adjust the CA path if `OPENSHELL_CLI_STATE` or the registration name differs.
+The API key is the agent-client token, separate from the MaaS API key and your
+OpenShift login token. Answers may contain no structured citations; verify the
+answer against the intended collection before use.
 
 Additional optimized patterns are available in the RAG patterns artifact:
 

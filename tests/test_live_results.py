@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,14 @@ with patch.object(Path, "exists", return_value=False):
 
 
 class LiveResultTests(unittest.TestCase):
+    def test_setup_guide_section_links_have_navigation_targets(self):
+        guide = app.setup_guide_html()
+        links = set(re.findall(r'href="#([^"]+)"', guide))
+        targets = set(re.findall(r'id="([^"]+)"', guide))
+        self.assertIn("refresh-credentials", links)
+        self.assertIn("deployment-namespaces-and-agent-ops", links)
+        self.assertFalse(links - targets, f"Missing guide sections: {links - targets}")
+
     def predict(self, payload, request):
         config = {
             "api_token": "token", "endpoint_protocol": "kserve-v1",
