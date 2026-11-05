@@ -3,10 +3,8 @@
 This project was generated from an optimized RAG pattern. Before deploying the
 application, make sure MaaS and the selected vector database are reachable.
 
-These deployment instructions accompany the downstream runtime prepared by City
-Services Copilot. The downloaded archive's original deployment files are retained
-in the deployment workspace's `original-runtime/` directory, together with source
-provenance. Application code and optimized configuration remain from the run.
+These instructions use the Red Hat downstream runtime prepared by City Services
+Copilot. Application code and optimized configuration remain from the run.
 
 The existing indexed collection is an input to this starter kit. Do not run
 `make load-docs` against it. Re-indexing belongs to the separate document
@@ -91,15 +89,14 @@ The Sandbox resource is `default--<sandbox-name>` in the gateway namespace;
 the standalone kit defaults to `rag-sandbox`, while the demo runner selects
 `city-services-rag` through `OPENSHELL_SANDBOX_NAME`.
 
-This prepared Makefile adds `OPENSHELL_NAMESPACE` (default `openshell`) for
-standalone use with another existing gateway. The original v0.25.4 template
-hardcodes `openshell`; it does not ask the end user to fill an empty namespace.
+Set `OPENSHELL_NAMESPACE` (default `openshell`) when using this Makefile
+standalone with another existing gateway.
 Changing this variable or the current project does not relocate a gateway-managed
 Sandbox. The demo runner's complete flow currently supports `openshell` only.
 Pass `OPENSHELL_GATEWAY_NAME=<name>` or `OPENSHELL_CLI_STATE=<directory>` to `make`
 when using another registration name or host state directory. Use the same settings
 as the administrator's gateway setup. The gateway must be compatible with the
-downstream RHOAI CLI; an upstream 0.0.99 gateway needs migration by its administrator.
+downstream RHOAI CLI.
 
 `make deploy-openshell` creates and configures the sandbox, starts the agent,
 and exposes it through an OpenShift route.

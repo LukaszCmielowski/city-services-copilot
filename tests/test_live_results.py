@@ -5,7 +5,8 @@ import json
 import re
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.parse import urljoin, urlsplit
 
 
 with patch.object(Path, "exists", return_value=False):
@@ -16,12 +17,44 @@ with patch.object(Path, "exists", return_value=False):
 
 class LiveResultTests(unittest.TestCase):
     def test_setup_guide_section_links_have_navigation_targets(self):
+        for route, path in app.SETUP_GUIDES.items():
+            guide = app.setup_guide_html(path)
+            links = re.findall(r'href="([^"]+)"', guide)
+            self.assertTrue(links)
+            for link in links:
+                target = urlsplit(urljoin(route, link))
+                if target.scheme or not target.fragment:
+                    continue
+                with self.subTest(route=route, link=link):
+                    self.assertIn(target.path, app.SETUP_GUIDES)
+                    destination = app.setup_guide_html(app.SETUP_GUIDES[target.path])
+                    self.assertIn(f'id="{target.fragment}"', destination)
+
+    def test_setup_reference_is_served_without_exposing_private_files(self):
+        for path, allowed in (("/docs/END_TO_END_GUIDE.md", True), ("/data/README.md", True),
+                              ("/.env", False), ("/app-config.json", False),
+                              ("/docs/../.env", False), ("/scripts/run_cluster_demo.py", False)):
+            with self.subTest(path=path):
+                handler = object.__new__(app.Handler)
+                handler.path = path
+                handler.wfile = io.BytesIO()
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                handler.send_error = Mock()
+                handler.do_GET()
+                if allowed:
+                    handler.send_response.assert_called_once_with(200)
+                    self.assertIn(b"<h1", handler.wfile.getvalue())
+                    handler.send_error.assert_not_called()
+                else:
+                    handler.send_error.assert_called_once_with(404)
+                    self.assertEqual(handler.wfile.getvalue(), b"")
+
+    def test_quick_start_steps_keep_their_numbers_after_code_blocks(self):
         guide = app.setup_guide_html()
-        links = set(re.findall(r'href="#([^"]+)"', guide))
-        targets = set(re.findall(r'id="([^"]+)"', guide))
-        self.assertIn("refresh-credentials", links)
-        self.assertIn("deployment-namespaces-and-agent-ops", links)
-        self.assertFalse(links - targets, f"Missing guide sections: {links - targets}")
+        self.assertIn('<ol start="2">', guide)
+        self.assertIn('<ol start="3">', guide)
 
     def predict(self, payload, request):
         config = {

@@ -21,6 +21,12 @@ from service_catalog import SERVICES, DEFAULT_SERVICE, SAMPLE_REQUESTS, PRIORITY
 
 CONFIG_PATH = ROOT / "app-config.json"
 PUBLIC_STATIC_PATHS = {"/app.js", "/styles.css", "/docs/assets/sample-ui.png"}
+SETUP_GUIDES = {
+    "/setup": ROOT / "README.md",
+    "/README.md": ROOT / "README.md",
+    "/docs/END_TO_END_GUIDE.md": ROOT / "docs" / "END_TO_END_GUIDE.md",
+    "/data/README.md": ROOT / "data" / "README.md",
+}
 
 
 class EndpointError(Exception):
@@ -510,11 +516,11 @@ def markdown_guide(markdown):
             if list_kind != "ul":
                 close_list(); output.append("<ul>"); list_kind = "ul"
             output.append(f"<li>{markdown_inline(match.group(1))}</li>")
-        elif match := re.match(r"^\d+\.\s+(.+)$", line):
+        elif match := re.match(r"^(\d+)\.\s+(.+)$", line):
             flush_paragraph()
             if list_kind != "ol":
-                close_list(); output.append("<ol>"); list_kind = "ol"
-            output.append(f"<li>{markdown_inline(match.group(1))}</li>")
+                close_list(); output.append(f'<ol start="{match.group(1)}">'); list_kind = "ol"
+            output.append(f"<li>{markdown_inline(match.group(2))}</li>")
         elif line.startswith("!["):
             flush_paragraph(); close_list()
             match = re.match(r"!\[([^\]]*)\]\(([^ )]+)\)", line)
@@ -527,8 +533,8 @@ def markdown_guide(markdown):
     return "\n".join(output)
 
 
-def setup_guide_html():
-    guide = markdown_guide((ROOT / "README.md").read_text(encoding="utf-8"))
+def setup_guide_html(path=None):
+    guide = markdown_guide((path or ROOT / "README.md").read_text(encoding="utf-8"))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>City Services Copilot — Setup guide</title>
@@ -577,8 +583,8 @@ class Handler(SimpleHTTPRequestHandler):
             pass
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in {"/", "/index.html", "/setup", "/README.md"}:
-            body = (setup_guide_html() if path in {"/setup", "/README.md"} else demo_page_html()).encode("utf-8")
+        if path in {"/", "/index.html"} or path in SETUP_GUIDES:
+            body = (setup_guide_html(SETUP_GUIDES[path]) if path in SETUP_GUIDES else demo_page_html()).encode("utf-8")
             try:
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
